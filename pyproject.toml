@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=61", "wheel", "torch>=2.1.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "whisper-blaze"
+version = "0.1.6"
+description = "Hopper-native CUDA kernels for Whisper large-v3 on H100 GPU"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.9"
+keywords = ["whisper", "cuda", "h100", "hopper", "fp8", "speech", "transcription"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: C++",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Multimedia :: Sound/Audio :: Speech",
+    "Environment :: GPU :: NVIDIA CUDA",
+    "Operating System :: POSIX :: Linux",
+]
+dependencies = [
+    "torch>=2.1.0",
+    "transformers>=4.36.0",
+    "numpy",
+]
+
+[project.optional-dependencies]
+audio = ["torchaudio>=2.1.0", "librosa>=0.10.0"]
+dev   = ["pytest", "pytest-benchmark"]
+
+[project.urls]
+Homepage = "https://github.com/YOUR_USERNAME/whisper-blaze"
+Repository = "https://github.com/YOUR_USERNAME/whisper-blaze"
+Issues = "https://github.com/YOUR_USERNAME/whisper-blaze/issues"
+
+[tool.uv]
+no-build-isolation = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

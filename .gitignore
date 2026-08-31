@@ -1,0 +1,30 @@
+# Build artifacts
+build/
+dist/
+*.egg-info/
+*.so
+*.o
+*.d
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environment
+.venv/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+
+# CUDA build temp
+*.cubin
+*.fatbin
+*.ptx
+
+init_git.sh
+push.sh

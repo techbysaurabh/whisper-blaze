@@ -1,0 +1,8 @@
+whisper-blaze uses the following open-source libraries:
+
+- transformers (Apache 2.0) - https://github.com/huggingface/transformers
+- PyTorch (BSD-3-Clause) - https://github.com/pytorch/pytorch
+- NumPy (BSD-3-Clause) - https://github.com/numpy/numpy
+
+Whisper large-v3 model weights are from OpenAI (MIT License).
+https://github.com/openai/whisper
