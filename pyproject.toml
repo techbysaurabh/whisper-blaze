@@ -36,9 +36,9 @@ audio = ["torchaudio>=2.1.0", "librosa>=0.10.0"]
 dev   = ["pytest", "pytest-benchmark"]
 
 [project.urls]
-Homepage = "https://github.com/YOUR_USERNAME/whisper-blaze"
-Repository = "https://github.com/YOUR_USERNAME/whisper-blaze"
-Issues = "https://github.com/YOUR_USERNAME/whisper-blaze/issues"
+Homepage = "https://github.com/techbysaurabh/whisper-blaze"
+Repository = "https://github.com/techbysaurabh/whisper-blaze"
+Issues = "https://github.com/techbysaurabh/whisper-blaze/issues"
 
 [tool.uv]
 no-build-isolation = true

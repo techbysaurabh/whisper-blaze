@@ -41,7 +41,7 @@ pip install whisper-blaze --no-build-isolation
 **From source:**
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/whisper-blaze.git
+git clone https://github.com/techbysaurabh/whisper-blaze.git
 cd whisper-blaze
 pip install -e . --no-build-isolation
 ```
