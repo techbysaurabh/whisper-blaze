@@ -105,6 +105,11 @@ def _decode_audio(data: bytes) -> np.ndarray:
         audio = audio.mean(axis=1 if audio.shape[0] > audio.shape[1] else 0)
     if sr != SAMPLE_RATE:
         audio = librosa.resample(audio, orig_sr=sr, target_sr=SAMPLE_RATE)
+    # The batched path builds one mel per 30s chunk and Whisper requires the
+    # full 3000 frames, so clips shorter than 30s must be zero-padded.
+    min_samples = CHUNK_SEC * SAMPLE_RATE
+    if len(audio) < min_samples:
+        audio = np.pad(audio, (0, min_samples - len(audio)))
     return audio
 
 
