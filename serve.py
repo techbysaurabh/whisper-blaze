@@ -38,11 +38,14 @@ VRAM_LIMIT_GB = float(os.environ.get("VRAM_LIMIT_GB", "0"))  # 0 = no limit
 SAMPLE_RATE   = 16000
 CHUNK_SEC     = 30
 
-# Batch sizing under a VRAM limit: reserve headroom for model weights +
-# runtime, then budget 30s chunks per pass at ~0.9 chunks/GB (empirical for
-# large-v3 mixed_fp8 on H100).
-_MODEL_OVERHEAD_GB = 8.0
-_CHUNKS_PER_GB     = 0.9
+# Batch sizing under a VRAM limit, measured on H100 with large-v3 and real
+# speech (linear fit, max residual 0.03 GB; identical across precision
+# presets since FP8 quantization is in-kernel and weights stay FP16):
+#   peak_gb = 2.92 + 0.249 * chunks
+# _SAFETY derates for decode-length variance across workloads.
+_MODEL_OVERHEAD_GB = 3.0
+_GB_PER_CHUNK      = 0.25
+_SAFETY            = 0.8
 _max_chunks: Optional[int] = None  # None = unlimited
 
 app = FastAPI(title="whisper-blaze", version="0.1.10")
@@ -61,7 +64,8 @@ def _apply_vram_limit():
     total_gb = torch.cuda.get_device_properties(0).total_memory / 2**30
     fraction = min(1.0, VRAM_LIMIT_GB / total_gb)
     torch.cuda.set_per_process_memory_fraction(fraction, 0)
-    _max_chunks = max(1, int((VRAM_LIMIT_GB - _MODEL_OVERHEAD_GB) * _CHUNKS_PER_GB))
+    _max_chunks = max(1, int((VRAM_LIMIT_GB - _MODEL_OVERHEAD_GB)
+                             / _GB_PER_CHUNK * _SAFETY))
     log.info("VRAM limit: %.0f GB of %.0f GB (fraction %.2f), max %d chunks/pass",
              VRAM_LIMIT_GB, total_gb, fraction, _max_chunks)
     if VRAM_LIMIT_GB < _MODEL_OVERHEAD_GB + 2:
