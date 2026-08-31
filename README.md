@@ -77,6 +77,12 @@ Configure via env vars: `MODEL_ID` (any HF Whisper checkpoint), `PRECISION`
 `HF_TOKEN`. Health check at `GET /health`. See `serve.py` and `Dockerfile`
 for details.
 
+**Sharing the GPU?** Set `VRAM_LIMIT_GB` to cap how much VRAM the server uses —
+e.g. `-e VRAM_LIMIT_GB=30` runs transcription in 30 GB of an 80 GB H100,
+leaving the rest for other workloads. This applies a hard allocator cap
+(`torch.cuda.set_per_process_memory_fraction`) and automatically sizes GPU
+batches to fit the budget.
+
 ## Quick Start
 
 ```python

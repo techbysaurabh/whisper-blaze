@@ -10,6 +10,8 @@ Environment
 MODEL_ID       HF model id            (default: openai/whisper-large-v3)
 PRECISION      full_fp16 | mixed_fp8 | aggressive_fp8   (default: mixed_fp8)
 BATCH_WAIT_MS  batching window in ms  (default: 200)
+VRAM_LIMIT_GB  cap GPU memory use, e.g. 30 to use 30 GB of an 80 GB H100
+               (default: 0 = use all available VRAM)
 PORT           listen port            (default: 8000)
 """
 
@@ -32,13 +34,45 @@ log = logging.getLogger("whisper-blaze-serve")
 MODEL_ID      = os.environ.get("MODEL_ID", "openai/whisper-large-v3")
 PRECISION     = os.environ.get("PRECISION", "mixed_fp8")
 BATCH_WAIT_MS = float(os.environ.get("BATCH_WAIT_MS", "200"))
+VRAM_LIMIT_GB = float(os.environ.get("VRAM_LIMIT_GB", "0"))  # 0 = no limit
 SAMPLE_RATE   = 16000
+CHUNK_SEC     = 30
+
+# Batch sizing under a VRAM limit: reserve headroom for model weights +
+# runtime, then budget 30s chunks per pass at ~0.9 chunks/GB (empirical for
+# large-v3 mixed_fp8 on H100).
+_MODEL_OVERHEAD_GB = 8.0
+_CHUNKS_PER_GB     = 0.9
+_max_chunks: Optional[int] = None  # None = unlimited
 
 app = FastAPI(title="whisper-blaze", version="0.1.10")
 
 _model = None
 _queue: Optional[asyncio.Queue] = None
 _gpu_executor = ThreadPoolExecutor(max_workers=1)  # one GPU worker
+
+
+def _apply_vram_limit():
+    """Hard-cap this process's CUDA allocations to VRAM_LIMIT_GB."""
+    global _max_chunks
+    if VRAM_LIMIT_GB <= 0:
+        return
+    import torch
+    total_gb = torch.cuda.get_device_properties(0).total_memory / 2**30
+    fraction = min(1.0, VRAM_LIMIT_GB / total_gb)
+    torch.cuda.set_per_process_memory_fraction(fraction, 0)
+    _max_chunks = max(1, int((VRAM_LIMIT_GB - _MODEL_OVERHEAD_GB) * _CHUNKS_PER_GB))
+    log.info("VRAM limit: %.0f GB of %.0f GB (fraction %.2f), max %d chunks/pass",
+             VRAM_LIMIT_GB, total_gb, fraction, _max_chunks)
+    if VRAM_LIMIT_GB < _MODEL_OVERHEAD_GB + 2:
+        log.warning("VRAM_LIMIT_GB=%.0f is very low; model weights alone need "
+                    "~%.0f GB — expect failures below that.",
+                    VRAM_LIMIT_GB, _MODEL_OVERHEAD_GB)
+
+
+def _est_chunks(audio: np.ndarray) -> int:
+    """Estimate how many 30s chunks this audio contributes to a GPU pass."""
+    return max(1, int(np.ceil(len(audio) / (CHUNK_SEC * SAMPLE_RATE))))
 
 
 def _load_model():
@@ -74,18 +108,26 @@ async def _batch_worker():
     """Collect requests for BATCH_WAIT_MS, then run one fused GPU pass per
     (language, task) group."""
     loop = asyncio.get_running_loop()
+    carry = None  # item deferred from the previous round by the chunk budget
     while True:
-        first = await _queue.get()
+        first = carry if carry is not None else await _queue.get()
+        carry = None
         batch = [first]
+        chunks = first["chunks"]
         deadline = loop.time() + BATCH_WAIT_MS / 1000.0
-        while True:
+        while _max_chunks is None or chunks < _max_chunks:
             timeout = deadline - loop.time()
             if timeout <= 0:
                 break
             try:
-                batch.append(await asyncio.wait_for(_queue.get(), timeout))
+                item = await asyncio.wait_for(_queue.get(), timeout)
             except asyncio.TimeoutError:
                 break
+            if _max_chunks is not None and chunks + item["chunks"] > _max_chunks:
+                carry = item  # over budget — defer to the next GPU pass
+                break
+            batch.append(item)
+            chunks += item["chunks"]
 
         groups = {}
         for item in batch:
@@ -115,6 +157,7 @@ async def _startup():
     global _model, _queue
     _queue = asyncio.Queue()
     loop = asyncio.get_running_loop()
+    _apply_vram_limit()
     _model = await loop.run_in_executor(None, _load_model)
     asyncio.create_task(_batch_worker())
     log.info("ready: model=%s precision=%s batch_wait=%sms",
@@ -129,6 +172,8 @@ async def health():
         "model": MODEL_ID,
         "precision": PRECISION,
         "batch_wait_ms": BATCH_WAIT_MS,
+        "vram_limit_gb": VRAM_LIMIT_GB or None,
+        "max_chunks_per_pass": _max_chunks,
         "queue_depth": _queue.qsize() if _queue else 0,
         "vram_used_gb": round(torch.cuda.memory_allocated() / 2**30, 1),
     }
@@ -154,7 +199,7 @@ async def transcriptions(
 
     future = asyncio.get_running_loop().create_future()
     await _queue.put({"audio": audio, "language": language, "task": task,
-                      "future": future})
+                      "chunks": _est_chunks(audio), "future": future})
     result = await future
 
     text = result["text"] if isinstance(result, dict) else str(result)
