@@ -10,6 +10,7 @@ Replaces standard PyTorch operations with hand-tuned CUDA kernels that exploit H
 - **Fused residual + LayerNorm / RMSNorm**
 - **GPU mel spectrogram** (replaces CPU librosa/HuggingFace preprocessor)
 - **FP8 quantize/dequantize** with per-tensor scaling
+- **Dynamic cross-request batching** — fuses concurrent API calls into one `model.generate()` pass to fill all 80 GB of H100 VRAM
 
 ## Requirements
 
@@ -41,7 +42,7 @@ pip install whisper-blaze --no-build-isolation
 **From source:**
 
 ```bash
-git clone https://github.com/techbysaurabh/whisper-blaze.git
+git clone https://github.com/YOUR_USERNAME/whisper-blaze.git
 cd whisper-blaze
 pip install -e . --no-build-isolation
 ```
@@ -63,9 +64,36 @@ model = WhisperBlaze.from_pretrained(
     precision=mixed_fp8(),
 )
 
-result = model.transcribe(audio_tensor, language="en")
+# Single file — numpy array or torch tensor, float32, 16 kHz
+# 1D [samples] or 2D [channels, samples] both accepted
+result = model.transcribe(audio, language="en")
 print(result["text"])
 ```
+
+## Batch Transcription
+
+`transcribe_batch()` accepts multiple audio files and fuses all their 30-second
+chunks into a **single `model.generate()` call**, maximising VRAM utilisation on
+an 80 GB H100.
+
+```python
+# results is a list of dicts, one per input audio
+results = model.transcribe_batch(
+    [audio1, audio2, audio3],
+    language="en",
+    task="transcribe",
+)
+for r in results:
+    print(r["text"])
+```
+
+**Why it matters:** a single 15-minute file uses ~40 GB VRAM. With
+`transcribe_batch()` you can process a second 15-minute file in the same GPU
+pass, using ~78 GB — the remaining 40 GB that would otherwise sit idle.
+
+Longer audio produces more internal chunks and uses more VRAM; shorter audio
+batches more requests into the same GPU pass. The batcher automatically caps
+batch size to stay within the available VRAM budget.
 
 ## Precision Presets
 
@@ -80,6 +108,28 @@ from whisper_blaze.precision import full_fp16, mixed_fp8, aggressive_fp8
 
 model = WhisperBlaze.from_pretrained(precision=aggressive_fp8())
 ```
+
+## Serving at Scale
+
+For production deployments, pair whisper-blaze with a dynamic batching API server
+that keeps a pool of concurrent requests in-flight and automatically groups them
+into GPU batches:
+
+```
+Client pool (10 concurrent)
+        │
+        ▼
+  FastAPI server              ← collect requests for 400 ms
+        │
+        ▼
+  transcribe_batch()          ← one model.generate() for the whole batch
+        │
+        ▼
+  Results returned individually
+```
+
+Dynamic batching delivers near-linear throughput scaling as concurrent requests
+increase, with idle VRAM automatically absorbed by larger batch sizes.
 
 ## GPU Mel Spectrogram
 

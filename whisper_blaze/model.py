@@ -288,6 +288,8 @@ class WhisperBlaze:
         """
         if isinstance(audio, torch.Tensor):
             audio = audio.numpy()
+        if audio.ndim == 2:
+            audio = audio.mean(axis=0)  # [channels, samples] → [samples]
 
         duration_s = len(audio) / self.SAMPLE_RATE
 
@@ -388,11 +390,13 @@ class WhisperBlaze:
         -------
         list of dicts, one per input audio, each with keys: text, language
         """
-        # Normalise all inputs to numpy
+        # Normalise all inputs to numpy, collapsing [channels, samples] → [samples]
         audios: List[np.ndarray] = []
         for audio in audio_list:
             if isinstance(audio, torch.Tensor):
                 audio = audio.numpy()
+            if audio.ndim == 2:
+                audio = audio.mean(axis=0)
             audios.append(audio)
 
         # Split each audio into 30s chunks, track per-request chunk counts
