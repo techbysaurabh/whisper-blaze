@@ -53,6 +53,30 @@ If your CUDA toolkit isn't at `/usr/local/cuda`, set `CUDA_HOME` first:
 export CUDA_HOME=/usr/local/cuda-12.6
 ```
 
+## Run with Docker
+
+The fastest way to serve whisper-blaze — no local CUDA toolkit needed:
+
+```bash
+docker run --gpus all -p 8000:8000 -v hf-cache:/data/hf \
+  ghcr.io/techbysaurabh/whisper-blaze:latest
+```
+
+Also on Docker Hub: `techbysaurabh/whisper-blaze`. Model weights download from
+Hugging Face on first start and are cached in the volume.
+
+The container exposes an OpenAI-compatible transcription API with dynamic
+cross-request batching (concurrent requests fuse into a single GPU pass):
+
+```bash
+curl -F file=@audio.mp3 -F language=en localhost:8000/v1/audio/transcriptions
+```
+
+Configure via env vars: `MODEL_ID` (any HF Whisper checkpoint), `PRECISION`
+(`full_fp16` / `mixed_fp8` / `aggressive_fp8`), `BATCH_WAIT_MS`, `PORT`,
+`HF_TOKEN`. Health check at `GET /health`. See `serve.py` and `Dockerfile`
+for details.
+
 ## Quick Start
 
 ```python
