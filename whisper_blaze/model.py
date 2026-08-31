@@ -421,8 +421,10 @@ class WhisperBlaze:
                 all_chunks.extend(req_chunks)
                 chunk_counts.append(len(req_chunks))
 
-        # Pad all chunks to the same length for batching
-        max_len = max(len(c) for c in all_chunks)
+        # Pad all chunks to the same length for batching. Never below a full
+        # 30s chunk: Whisper's mel input must be 3000 frames, so a batch made
+        # up entirely of short clips would otherwise fail in the encoder.
+        max_len = max(chunk_len, max(len(c) for c in all_chunks))
         padded  = [np.pad(c, (0, max_len - len(c))) for c in all_chunks]
 
         # One generate() call for the entire combined batch
