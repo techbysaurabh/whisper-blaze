@@ -366,6 +366,89 @@ class WhisperBlaze:
         # Merge with overlap dedup
         return self._merge_chunks(texts)
 
+    def transcribe_batch(
+        self,
+        audio_list: List,
+        language: Optional[str] = None,
+        task: str = "transcribe",
+    ) -> List[Dict[str, str]]:
+        """
+        Transcribe multiple audio files in a single GPU forward pass.
+
+        All chunks from all requests are stacked into one tensor and processed
+        with a single model.generate() call, maximising H100 VRAM utilisation.
+
+        Parameters
+        ----------
+        audio_list : list of numpy arrays or torch tensors, float32, 16 kHz
+        language   : ISO 639-1 code for all items, or None for auto-detect
+        task       : "transcribe" or "translate" — applied to all items
+
+        Returns
+        -------
+        list of dicts, one per input audio, each with keys: text, language
+        """
+        # Normalise all inputs to numpy
+        audios: List[np.ndarray] = []
+        for audio in audio_list:
+            if isinstance(audio, torch.Tensor):
+                audio = audio.numpy()
+            audios.append(audio)
+
+        # Split each audio into 30s chunks, track per-request chunk counts
+        all_chunks: List[np.ndarray] = []
+        chunk_counts: List[int] = []
+
+        sr        = self.SAMPLE_RATE
+        chunk_len = self.CHUNK_SEC * sr
+        stride    = self.STRIDE_SEC * sr
+
+        for audio in audios:
+            if len(audio) / sr <= self.CHUNK_SEC:
+                all_chunks.append(audio)
+                chunk_counts.append(1)
+            else:
+                req_chunks: List[np.ndarray] = []
+                for start in range(0, len(audio), stride):
+                    end = min(start + chunk_len, len(audio))
+                    req_chunks.append(audio[start:end])
+                    if end >= len(audio):
+                        break
+                all_chunks.extend(req_chunks)
+                chunk_counts.append(len(req_chunks))
+
+        # Pad all chunks to the same length for batching
+        max_len = max(len(c) for c in all_chunks)
+        padded  = [np.pad(c, (0, max_len - len(c))) for c in all_chunks]
+
+        # One generate() call for the entire combined batch
+        input_features = self.processor(
+            padded,
+            sampling_rate=sr,
+            return_tensors="pt",
+            padding=True,
+        ).input_features.to(self.device, dtype=torch.float16)
+
+        generate_kwargs: Dict = {"task": task, "no_repeat_ngram_size": 3}
+        if language:
+            generate_kwargs["language"] = language
+
+        with torch.inference_mode():
+            predicted_ids = self.model.generate(input_features, **generate_kwargs)
+
+        all_texts = self.processor.batch_decode(predicted_ids, skip_special_tokens=True)
+
+        # Re-assemble per-request results
+        results: List[Dict[str, str]] = []
+        idx = 0
+        for count in chunk_counts:
+            texts = all_texts[idx : idx + count]
+            idx  += count
+            text  = texts[0].strip() if count == 1 else self._merge_chunks(texts)
+            results.append({"text": text, "language": language or "auto"})
+
+        return results
+
     @staticmethod
     def _merge_chunks(texts: List[str]) -> str:
         """Merge overlapping chunk transcriptions, removing duplicates."""

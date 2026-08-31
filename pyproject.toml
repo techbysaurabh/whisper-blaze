@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "whisper-blaze"
-version = "0.1.6"
+version = "0.1.7"
 description = "Hopper-native CUDA kernels for Whisper large-v3 on H100 GPU"
 readme = "README.md"
-license = {text = "MIT"}
+license = "MIT"
 requires-python = ">=3.9"
 keywords = ["whisper", "cuda", "h100", "hopper", "fp8", "speech", "transcription"]
 classifiers = [
