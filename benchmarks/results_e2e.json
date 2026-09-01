@@ -1,50 +1,50 @@
 {
   "blaze full_fp16 transcribe() serial": {
-    "wall_s": 6.47,
-    "rtfx": 203.8,
-    "peak_vram_gb": 9.21,
+    "wall_s": 6.04,
+    "rtfx": 218.1,
+    "peak_vram_gb": 8.41,
     "note": ""
   },
   "blaze full_fp16 transcribe_batch()": {
-    "wall_s": 3.54,
-    "rtfx": 372.2,
-    "peak_vram_gb": 16.7,
+    "wall_s": 3.15,
+    "rtfx": 418.5,
+    "peak_vram_gb": 15.1,
     "note": "3 results"
   },
   "_sample_text": "Hello Hello Hello Very Good Morning Sir I am Sandeep speaking from Just Dial. Sir, I am speaking from India Holders NXT owner. Yes Sir. I am getting to know tha",
   "blaze mixed_fp8 transcribe() serial": {
-    "wall_s": 6.32,
-    "rtfx": 208.5,
-    "peak_vram_gb": 9.21,
+    "wall_s": 5.8,
+    "rtfx": 227.2,
+    "peak_vram_gb": 8.41,
     "note": ""
   },
   "blaze mixed_fp8 transcribe_batch()": {
-    "wall_s": 3.48,
-    "rtfx": 379.1,
-    "peak_vram_gb": 16.7,
+    "wall_s": 3.21,
+    "rtfx": 410.9,
+    "peak_vram_gb": 15.1,
     "note": "3 results"
   },
   "stock HF chunked batch=1 (naive)": {
-    "wall_s": 39.32,
-    "rtfx": 33.5,
+    "wall_s": 38.58,
+    "rtfx": 34.2,
     "peak_vram_gb": 3.16,
     "note": ""
   },
   "stock HF batched (fair baseline)": {
-    "wall_s": 2.58,
-    "rtfx": 510.2,
+    "wall_s": 2.55,
+    "rtfx": 516.7,
     "peak_vram_gb": 14.32,
     "note": "3 results"
   },
   "faster-whisper fp16": {
-    "wall_s": 92.41,
-    "rtfx": 14.3,
+    "wall_s": 76.73,
+    "rtfx": 17.2,
     "peak_vram_gb": 0.03,
     "note": ""
   },
   "faster-whisper batched(16)": {
-    "wall_s": 8.48,
-    "rtfx": 155.4,
+    "wall_s": 8.17,
+    "rtfx": 161.3,
     "peak_vram_gb": 0.03,
     "note": ""
   },

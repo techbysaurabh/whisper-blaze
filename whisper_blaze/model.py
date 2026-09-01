@@ -249,7 +249,12 @@ class WhisperBlaze:
 
     SAMPLE_RATE = 16_000
     CHUNK_SEC   = 30
-    STRIDE_SEC  = 25  # 5 second overlap
+    # 2 s overlap. Measured on 27 min of long-form audio (benchmarks/
+    # bench_overlap.py): 2 s gives WER 11.82%, against 13.21% with no overlap,
+    # 14.07% at the previous 5 s and 24.28% at 10 s. Too much overlap defeats
+    # _merge_chunks()'s string-matching dedup and leaves duplicated text, so
+    # more overlap is not safer — it is worse, and slower.
+    STRIDE_SEC  = 28
 
     def __init__(
         self,

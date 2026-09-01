@@ -1,25 +1,25 @@
 {
   "blaze_full_fp16": {
     "wer": 2.83,
-    "wall_s": 40.3,
+    "wall_s": 40.5,
     "rtfx": 16.6
   },
   "blaze_mixed_fp8": {
     "wer": 2.83,
     "wall_s": 40.0,
-    "rtfx": 16.8
+    "rtfx": 16.7
   },
   "blaze_aggressive_fp8": {
     "wer": 2.83,
-    "wall_s": 40.2,
-    "rtfx": 16.7
+    "wall_s": 39.6,
+    "rtfx": 16.9
   },
   "identical_to_fp16_mixed_fp8": "100/100",
   "identical_to_fp16_aggressive_fp8": "100/100",
   "faster_whisper_fp16": {
     "wer": 1.76,
-    "wall_s": 25.6,
-    "rtfx": 26.2
+    "wall_s": 25.8,
+    "rtfx": 26.0
   },
   "_meta": {
     "dataset": "librispeech_asr test-clean",

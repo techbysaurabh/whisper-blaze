@@ -1,0 +1,34 @@
+{
+  "stride_30s": {
+    "overlap_s": 0,
+    "chunks": 55,
+    "wer": 13.21,
+    "wall_s": 4.14,
+    "rtfx": 392.5,
+    "peak_vram_gb": 16.97
+  },
+  "stride_28s": {
+    "overlap_s": 2,
+    "chunks": 58,
+    "wer": 11.82,
+    "wall_s": 3.65,
+    "rtfx": 444.7,
+    "peak_vram_gb": 17.63
+  },
+  "stride_25s": {
+    "overlap_s": 5,
+    "chunks": 65,
+    "wer": 14.07,
+    "wall_s": 3.99,
+    "rtfx": 407.1,
+    "peak_vram_gb": 19.4
+  },
+  "stride_20s": {
+    "overlap_s": 10,
+    "chunks": 82,
+    "wer": 24.28,
+    "wall_s": 4.76,
+    "rtfx": 341.2,
+    "peak_vram_gb": 23.42
+  }
+}

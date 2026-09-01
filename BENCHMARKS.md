@@ -72,6 +72,63 @@ is real (it exceeds the ±1% run-to-run noise the control shows), correct, and
 it proves the patching path works end to end. Attention is where a large win
 would be, and those kernels must be fixed before they can be wired in.
 
+## Update — chunk overlap retuned (25 s → 28 s stride)
+
+`transcribe_batch()` walked the audio with a 25 s stride over 30 s windows
+(5 s overlap) and stripped the duplicated text with `_merge_chunks()`.
+LibriSpeech utterances are ~7 s and never exercise chunking, so this was tested
+on 27 minutes of long-form audio built by concatenating 200 utterances
+(`benchmarks/bench_overlap.py`). Decoding is deterministic — WER was
+bit-identical across repeat runs, so these differences are real.
+
+| Stride | Overlap | Chunks | WER | RTFx | Peak VRAM |
+|---|---|---|---|---|---|
+| 30 s | 0 s | 55 | 13.21% | 397.0× | 16.97 GB |
+| **28 s (new default)** | **2 s** | **58** | **11.82%** | **455.3×** | 17.63 GB |
+| 25 s (old default) | 5 s | 65 | 14.07% | 403.5× | 19.40 GB |
+| 20 s | 10 s | 82 | 24.28% | 359.9× | 23.42 GB |
+
+**More overlap is not safer — it is worse.** Beyond ~2 s, `_merge_chunks()`'s
+string-matching dedup stops finding the seam and leaves duplicated text in the
+output, which is why 10 s of overlap nearly doubles WER. The shipped 5 s
+setting was mistuned in both directions at once: less accurate *and* slower
+than 2 s.
+
+End-to-end effect on the 22-minute call corpus, with the LayerNorm kernel also
+wired in:
+
+| Metric | Original | Now | Change |
+|---|---|---|---|
+| `transcribe_batch()` | 372.2× | **418.5×** | **+12.4%** |
+| `transcribe()` serial | 203.8× | 218.1× | +7.0% |
+| Peak VRAM (batched) | 16.70 GB | **15.10 GB** | **−9.6%** |
+| Long-form WER | 14.07% | **11.82%** | **−2.25 pts** |
+| Short-utterance WER | 2.83% | 2.83% | unchanged |
+
+Nothing was traded away: long-form accuracy improved, short-form accuracy is
+untouched (audio under 30 s is never chunked), and both speed and memory
+improved.
+
+The gap to a plain HuggingFace batching loop narrowed from 37% to 23%
+(516.7× vs 418.5×). What remains is mostly that blaze still decodes 58 chunks
+where non-overlapping windows need 45.
+
+### KV cache — blocked upstream
+
+Profiling showed `CatArrayBatchedCopy` at 31.8 ms (5.8% of GPU time), which is
+the decoder concatenating its KV cache every step. A pre-allocated cache would
+remove most of it, but `generate(cache_implementation="static")` fails on
+Whisper in transformers 5.5:
+
+```
+TypeError: linear(): argument 'input' (position 1) must be Tensor, not NoneType
+```
+
+The static cache does not handle the encoder-decoder cross-attention path, and
+enabling it also triggers `torch._dynamo` recompilation. Working around this
+inside whisper-blaze would mean reimplementing cache handling, with real risk
+to output correctness, so it is left alone pending an upstream fix.
+
 ### Build requirement discovered
 
 The extension **does not compile with CUDA 12.0**, contrary to `CLAUDE.md`:
