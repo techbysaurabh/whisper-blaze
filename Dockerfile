@@ -1,7 +1,7 @@
 # whisper-blaze — Hopper-native Whisper serving for H100
 #
-# Build:  docker build -t whisper-blaze:0.1.14 .
-# Run:    docker run --gpus all -p 8000:8000 whisper-blaze:0.1.14
+# Build:  docker build -t whisper-blaze:0.1.15 .
+# Run:    docker run --gpus all -p 8000:8000 whisper-blaze:0.1.15
 #
 # The kernels are compiled for sm_90a (H100/H200 only).
 
@@ -54,7 +54,10 @@ ENV MODEL_ID=openai/whisper-large-v3 \
     PRECISION=full_fp16 \
     BATCH_WAIT_MS=200 \
     PORT=8000 \
-    HF_HOME=/data/hf
+    HF_HOME=/data/hf \
+    # Keeps the allocator's cached pool from fragmenting inside VRAM_LIMIT_GB,
+    # where an allocation can otherwise fail while still under budget.
+    PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 VOLUME /data/hf
 EXPOSE 8000

@@ -17,7 +17,8 @@ MODE           fast | accurate        (default: fast)
                  the word error rate (6.8%), about 2x slower (~215 RTFx)
                Selectable per request with the `mode` form field.
 VRAM_LIMIT_GB  cap GPU memory use, e.g. 30 to use 30 GB of an 80 GB H100
-               (default: 0 = use all available VRAM)
+               (default: 0 = use all available VRAM). A batch that still
+               exceeds the cap is halved and retried rather than failed.
 PORT           listen port            (default: 8000)
 """
 
@@ -27,7 +28,13 @@ import logging
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor
-from typing import Optional
+from typing import List, Optional
+
+# Must be set before the CUDA caching allocator is first used, i.e. before
+# torch initialises CUDA. Without it the allocator's cached pool fragments
+# inside VRAM_LIMIT_GB and a modest allocation fails while still under
+# budget ("X GiB reserved but unallocated").
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 import numpy as np
 import soundfile as sf
@@ -55,7 +62,7 @@ _GB_PER_CHUNK      = 0.25
 _SAFETY            = 0.8
 _max_chunks: Optional[int] = None  # None = unlimited
 
-app = FastAPI(title="whisper-blaze", version="0.1.14")
+app = FastAPI(title="whisper-blaze", version="0.1.15")
 
 _model = None
 _queue: Optional[asyncio.Queue] = None
@@ -120,6 +127,51 @@ def _decode_audio(data: bytes) -> np.ndarray:
     return audio
 
 
+def _is_oom(exc: BaseException) -> bool:
+    """Whether this exception is a CUDA out-of-memory condition."""
+    import torch
+    if isinstance(exc, torch.cuda.OutOfMemoryError):
+        return True
+    return "out of memory" in str(exc).lower()
+
+
+async def _run_group(loop, items: List[dict], language, task, mode) -> None:
+    """Transcribe one group, halving the batch on CUDA OOM.
+
+    A batch can exceed VRAM even inside the chunk budget — decode length
+    varies, and long requests are heavier than the estimate. Rather than
+    failing every request in the batch, free the cache and retry each half,
+    recursing down to a single request so progress is always made. A single
+    request that still OOMs is a genuine failure and is reported as one.
+    """
+    audios = [it["audio"] for it in items]
+    try:
+        results = await loop.run_in_executor(
+            _gpu_executor,
+            lambda: _model.transcribe_batch(audios, language=language,
+                                            task=task, mode=mode),
+        )
+        for it, res in zip(items, results):
+            if not it["future"].done():
+                it["future"].set_result(res)
+        return
+    except Exception as exc:  # noqa: BLE001
+        if not _is_oom(exc) or len(items) == 1:
+            raise
+        import torch
+        torch.cuda.empty_cache()
+        log.warning("CUDA OOM on batch=%d — splitting and retrying", len(items))
+
+    mid = len(items) // 2
+    for half in (items[:mid], items[mid:]):
+        try:
+            await _run_group(loop, half, language, task, mode)
+        except Exception as exc:  # noqa: BLE001 — this half failed, not the other
+            for it in half:
+                if not it["future"].done():
+                    it["future"].set_exception(exc)
+
+
 async def _batch_worker():
     """Collect requests for BATCH_WAIT_MS, then run one fused GPU pass per
     (language, task) group."""
@@ -151,19 +203,12 @@ async def _batch_worker():
                 (item["language"], item["task"], item["mode"]), []).append(item)
 
         for (language, task, mode), items in groups.items():
-            audios = [it["audio"] for it in items]
             t0 = time.perf_counter()
             try:
-                results = await loop.run_in_executor(
-                    _gpu_executor,
-                    lambda: _model.transcribe_batch(audios, language=language,
-                                                    task=task, mode=mode),
-                )
-                dt = time.perf_counter() - t0
+                await _run_group(loop, items, language, task, mode)
                 log.info("batch=%d language=%s task=%s mode=%s gpu_time=%.2fs",
-                         len(items), language, task, mode, dt)
-                for it, res in zip(items, results):
-                    it["future"].set_result(res)
+                         len(items), language, task, mode,
+                         time.perf_counter() - t0)
             except Exception as exc:  # noqa: BLE001 — propagate to every waiter
                 for it in items:
                     if not it["future"].done():
