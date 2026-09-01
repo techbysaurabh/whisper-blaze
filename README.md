@@ -2,24 +2,18 @@
 
 High-throughput batched serving for [Whisper large-v3](https://huggingface.co/openai/whisper-large-v3) on NVIDIA H100, with a fused Hopper LayerNorm kernel.
 
-- **Dynamic cross-request batching** — fuses concurrent requests into a single
-  `model.generate()` pass. **11× faster than chunk-at-a-time HuggingFace**
-  (418× vs 33× real-time on an idle H100).
+- **Dynamic cross-request batching** — concurrent requests are fused into a
+  single `model.generate()` pass instead of being decoded one chunk at a time.
 - **VRAM capping for shared GPUs** — `VRAM_LIMIT_GB=24` runs transcription in
-  24 GB of an 80 GB card and sizes batches to fit. Memory is linear and
-  measured: `peak_gb = 2.92 + 0.249 × chunks`.
-- **Two long-form modes, selectable per request** — `fast` (default, 11.8% WER,
-  ~420× real-time) or `accurate`, which stitches chunks on Whisper's own
-  timestamps for **6.8% WER** at ~215×.
+  24 GB of an 80 GB card and sizes each GPU batch to fit the budget.
+- **Two long-form modes, selectable per request** — `fast` (default) stitches
+  chunks by matching transcript text across a short overlap; `accurate`
+  stitches on Whisper's own segment timestamps for materially lower word error
+  rate, at roughly half the throughput.
 - **OpenAI-compatible server in one command** — point existing OpenAI audio
   clients at it by changing the base URL.
-- **Fused residual + LayerNorm CUDA kernel** — 1.8–2.5× over `torch.nn.LayerNorm`,
+- **Fused residual + LayerNorm CUDA kernel** — a hand-written Hopper kernel,
   used for all 162 LayerNorms in the model.
-
-Every number above is measured on a dedicated idle H100 and reproducible with
-the scripts in `benchmarks/`. Full methodology, comparisons against
-`faster-whisper` and stock HuggingFace, and raw results:
-**[BENCHMARKS.md](BENCHMARKS.md)**.
 
 ## Requirements
 
