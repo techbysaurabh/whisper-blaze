@@ -284,9 +284,48 @@ class TestAttention:
         assert out.dtype == torch.float16
 
     def test_attention_not_nan(self, qkv):
+        """NOTE: this passes only because the fixture uses a 64-token sequence.
+        The kernels produce NaNs at longer lengths — see
+        test_attention_matches_sdpa, which covers realistic shapes.
+        """
         Q, K, V = qkv
         for fn in [kernels.encoder_self_attn,
                    kernels.decoder_cross_attn,
                    kernels.decoder_self_attn]:
             out = fn(Q, K, V)
             assert not torch.isnan(out).any(), f"{fn.__name__} produced NaNs"
+
+    @pytest.mark.xfail(
+        strict=False,
+        reason="Attention kernels are unfinished: outputs are numerically "
+               "wrong at every length (relative L2 1.0-9.2 against SDPA) and "
+               "become NaN at Whisper's 1500-token encoder length. They are "
+               "not wired into the model. Remove this marker when fixed.",
+    )
+    @pytest.mark.parametrize("seq_len", [64, 256, 448, 1500])
+    @pytest.mark.parametrize(
+        "fn_name,causal",
+        [("encoder_self_attn", False),
+         ("decoder_cross_attn", False),
+         ("decoder_self_attn", True)],
+    )
+    def test_attention_matches_sdpa(self, fn_name, causal, seq_len):
+        """Attention must match torch SDPA, not merely avoid NaNs.
+
+        The shape/dtype/not-NaN tests above all pass on a kernel that returns
+        uncorrelated values, so correctness needs its own check.
+        """
+        B, H, D = 1, 20, 64
+        Q = torch.randn(B, H, seq_len, D, dtype=torch.float16, device=DEVICE)
+        K = torch.randn_like(Q)
+        V = torch.randn_like(Q)
+
+        out = getattr(kernels, fn_name)(Q, K, V).float()
+        ref = F.scaled_dot_product_attention(
+            Q.float(), K.float(), V.float(), is_causal=causal)
+
+        assert not torch.isnan(out).any(), f"{fn_name} produced NaNs at seq={seq_len}"
+        rel = ((out - ref).norm() / ref.norm()).item()
+        assert rel < 2e-2, (
+            f"{fn_name} seq={seq_len}: relative L2 error {rel:.3e} "
+            f"(max abs {(out - ref).abs().max().item():.4f})")
