@@ -10,6 +10,12 @@ Environment
 MODEL_ID       HF model id            (default: openai/whisper-large-v3)
 PRECISION      full_fp16 | mixed_fp8 | aggressive_fp8   (default: mixed_fp8)
 BATCH_WAIT_MS  batching window in ms  (default: 200)
+MODE           fast | accurate        (default: fast)
+               fast: stitches long audio by matching transcript strings over a
+                 2s chunk overlap - maximum throughput (~420 RTFx, 11.8% WER)
+               accurate: stitches on Whisper's own timestamps - roughly half
+                 the word error rate (6.8%), about 2x slower (~215 RTFx)
+               Selectable per request with the `mode` form field.
 VRAM_LIMIT_GB  cap GPU memory use, e.g. 30 to use 30 GB of an 80 GB H100
                (default: 0 = use all available VRAM)
 PORT           listen port            (default: 8000)
@@ -34,6 +40,7 @@ log = logging.getLogger("whisper-blaze-serve")
 MODEL_ID      = os.environ.get("MODEL_ID", "openai/whisper-large-v3")
 PRECISION     = os.environ.get("PRECISION", "mixed_fp8")
 BATCH_WAIT_MS = float(os.environ.get("BATCH_WAIT_MS", "200"))
+MODE          = os.environ.get("MODE", "fast")
 VRAM_LIMIT_GB = float(os.environ.get("VRAM_LIMIT_GB", "0"))  # 0 = no limit
 SAMPLE_RATE   = 16000
 CHUNK_SEC     = 30
@@ -140,19 +147,21 @@ async def _batch_worker():
 
         groups = {}
         for item in batch:
-            groups.setdefault((item["language"], item["task"]), []).append(item)
+            groups.setdefault(
+                (item["language"], item["task"], item["mode"]), []).append(item)
 
-        for (language, task), items in groups.items():
+        for (language, task, mode), items in groups.items():
             audios = [it["audio"] for it in items]
             t0 = time.perf_counter()
             try:
                 results = await loop.run_in_executor(
                     _gpu_executor,
-                    lambda: _model.transcribe_batch(audios, language=language, task=task),
+                    lambda: _model.transcribe_batch(audios, language=language,
+                                                    task=task, mode=mode),
                 )
                 dt = time.perf_counter() - t0
-                log.info("batch=%d language=%s task=%s gpu_time=%.2fs",
-                         len(items), language, task, dt)
+                log.info("batch=%d language=%s task=%s mode=%s gpu_time=%.2fs",
+                         len(items), language, task, mode, dt)
                 for it, res in zip(items, results):
                     it["future"].set_result(res)
             except Exception as exc:  # noqa: BLE001 — propagate to every waiter
@@ -181,6 +190,7 @@ async def health():
         "model": MODEL_ID,
         "precision": PRECISION,
         "batch_wait_ms": BATCH_WAIT_MS,
+        "mode": MODE,
         "vram_limit_gb": VRAM_LIMIT_GB or None,
         "max_chunks_per_pass": _max_chunks,
         "queue_depth": _queue.qsize() if _queue else 0,
@@ -194,11 +204,17 @@ async def transcriptions(
     language: Optional[str] = Form(None),
     task: str = Form("transcribe"),
     response_format: str = Form("json"),
+    mode: Optional[str] = Form(None),
 ):
     if _model is None:
         raise HTTPException(503, "model is still loading")
     if task not in ("transcribe", "translate"):
         raise HTTPException(400, f"invalid task {task!r}")
+    mode = mode or MODE
+    from whisper_blaze.model import WhisperBlaze as _WB
+    if mode not in _WB.MODES:
+        raise HTTPException(
+            400, f"invalid mode {mode!r}; expected one of {sorted(_WB.MODES)}")
 
     data = await file.read()
     try:
@@ -208,7 +224,8 @@ async def transcriptions(
 
     future = asyncio.get_running_loop().create_future()
     await _queue.put({"audio": audio, "language": language, "task": task,
-                      "chunks": _est_chunks(audio), "future": future})
+                      "mode": mode, "chunks": _est_chunks(audio),
+                      "future": future})
     result = await future
 
     text = result["text"] if isinstance(result, dict) else str(result)

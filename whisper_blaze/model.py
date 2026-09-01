@@ -250,22 +250,45 @@ class WhisperBlaze:
 
     SAMPLE_RATE = 16_000
     CHUNK_SEC   = 30
-    # No overlap. Timestamp-based merging (below) segments long audio using
-    # Whisper's own segment boundaries, which removes the need to re-decode
-    # overlapping audio. Measured on 27 min of long-form audio
-    # (benchmarks/bench_overlap.py): 6.83% WER here, against 11.82% for the
-    # best overlap setting under the old string-matching merge.
-    # If USE_TIMESTAMP_MERGE is turned off, set this to 28 (2 s overlap),
-    # which is the best the string merge achieves.
-    STRIDE_SEC  = 30
 
-    #: Segment long audio using Whisper's own timestamps rather than by
-    #: matching transcript strings across overlapping chunks. Nearly halves
-    #: long-form WER (6.83% vs 11.82%) because decoding with timestamps is the
-    #: mode Whisper was trained for, but generation costs ~2x: the timestamp
-    #: logits processor runs per decoding step. Set False (and STRIDE_SEC=28)
-    #: for maximum throughput at lower accuracy.
-    USE_TIMESTAMP_MERGE = True
+    #: How long audio (>30 s) is split and stitched back together. Selectable
+    #: per call — see the `mode` argument on transcribe()/transcribe_batch().
+    #: Measured on 27 min of long-form audio (benchmarks/bench_overlap.py):
+    #:
+    #:   fast      string merge, 2s overlap WER 11.82%   418-432 RTFx  (default)
+    #:   accurate  timestamps, no overlap   WER  6.83%   194-216 RTFx
+    #:
+    #: "accurate" decodes with return_timestamps=True and stitches on Whisper's
+    #: own segment boundaries, which nearly halves long-form WER but costs ~2x
+    #: in generation (the timestamp logits processor runs per decoding step).
+    #: "fast" stitches by matching transcript strings across a 2 s overlap.
+    #: Audio under 30 s is never chunked, so the mode does not affect it.
+    MODES: Dict[str, Dict] = {
+        "accurate": {"timestamps": True,  "stride_sec": 30},
+        "fast":     {"timestamps": False, "stride_sec": 28},
+    }
+    #: Default is "fast" — maximum throughput. Pass mode="accurate" per call
+    #: (or change this) when word error rate matters more than speed.
+    DEFAULT_MODE = "fast"
+
+    #: Legacy overrides. Left at None, the mode decides. Setting either pins
+    #: that value for every call regardless of mode.
+    STRIDE_SEC: Optional[int] = None
+    USE_TIMESTAMP_MERGE: Optional[bool] = None
+
+    @classmethod
+    def _resolve_mode(cls, mode: Optional[str]) -> Tuple[bool, int]:
+        """Return (use_timestamps, stride_seconds) for the requested mode."""
+        name = mode or cls.DEFAULT_MODE
+        if name not in cls.MODES:
+            raise ValueError(
+                f"unknown mode {name!r}; expected one of {sorted(cls.MODES)}")
+        settings = cls.MODES[name]
+        use_ts = (cls.USE_TIMESTAMP_MERGE if cls.USE_TIMESTAMP_MERGE is not None
+                  else settings["timestamps"])
+        stride = (cls.STRIDE_SEC if cls.STRIDE_SEC is not None
+                  else settings["stride_sec"])
+        return use_ts, stride
 
     def __init__(
         self,
@@ -331,6 +354,7 @@ class WhisperBlaze:
         audio,
         language: Optional[str] = None,
         task: str = "transcribe",
+        mode: Optional[str] = None,
     ) -> Dict[str, str]:
         """
         Transcribe audio of any length.
@@ -343,6 +367,8 @@ class WhisperBlaze:
         audio    : numpy array or torch tensor, float32, 16 kHz
         language : ISO 639-1 language code, or None for auto-detect
         task     : "transcribe" or "translate"
+        mode     : "accurate" (default) or "fast" — see MODES. Only affects
+                   audio longer than 30 s, which is the only case that chunks.
 
         Returns
         -------
@@ -358,7 +384,7 @@ class WhisperBlaze:
         if duration_s <= self.CHUNK_SEC:
             text = self._transcribe_short(audio, language, task)
         else:
-            text = self._transcribe_long(audio, language, task)
+            text = self._transcribe_long(audio, language, task, mode)
 
         return {"text": text.strip(), "language": language or "auto"}
 
@@ -384,20 +410,23 @@ class WhisperBlaze:
         return self.processor.batch_decode(ids, skip_special_tokens=True)[0]
 
     def _transcribe_long(
-        self, audio: np.ndarray, language: Optional[str], task: str
+        self, audio: np.ndarray, language: Optional[str], task: str,
+        mode: Optional[str] = None,
     ) -> str:
         """Batched transcription for audio longer than 30 s.
 
         Delegates to transcribe_batch() so both entry points share one
         chunking and merging implementation.
         """
-        return self.transcribe_batch([audio], language=language, task=task)[0]["text"]
+        return self.transcribe_batch(
+            [audio], language=language, task=task, mode=mode)[0]["text"]
 
     def transcribe_batch(
         self,
         audio_list: List,
         language: Optional[str] = None,
         task: str = "transcribe",
+        mode: Optional[str] = None,
     ) -> List[Dict[str, str]]:
         """
         Transcribe multiple audio files in a single GPU forward pass.
@@ -410,6 +439,8 @@ class WhisperBlaze:
         audio_list : list of numpy arrays or torch tensors, float32, 16 kHz
         language   : ISO 639-1 code for all items, or None for auto-detect
         task       : "transcribe" or "translate" — applied to all items
+        mode       : "accurate" (default) or "fast" — see MODES. Resolved per
+                     call, so concurrent callers can use different modes.
 
         Returns
         -------
@@ -430,7 +461,8 @@ class WhisperBlaze:
 
         sr        = self.SAMPLE_RATE
         chunk_len = self.CHUNK_SEC * sr
-        stride    = self.STRIDE_SEC * sr
+        use_timestamps, stride_sec = self._resolve_mode(mode)
+        stride    = stride_sec * sr
 
         for audio in audios:
             if len(audio) / sr <= self.CHUNK_SEC:
@@ -465,7 +497,7 @@ class WhisperBlaze:
             generate_kwargs["language"] = language
         # Timestamps let overlapping chunks be stitched by time rather than by
         # matching transcript strings; see _merge_segments.
-        if self.USE_TIMESTAMP_MERGE:
+        if use_timestamps:
             generate_kwargs["return_timestamps"] = True
 
         with torch.inference_mode():
@@ -473,7 +505,7 @@ class WhisperBlaze:
 
         all_texts = self.processor.batch_decode(predicted_ids, skip_special_tokens=True)
         all_ts = None
-        if self.USE_TIMESTAMP_MERGE:
+        if use_timestamps:
             # Decode one sequence at a time: the timestamp decoder walks tokens
             # as Python ints, which batch_decode does not guarantee.
             tok = self.processor.tokenizer
@@ -493,7 +525,7 @@ class WhisperBlaze:
                 if all_ts is not None:
                     segments: List[Tuple[float, float, str]] = []
                     for j in range(count):
-                        offset = j * self.STRIDE_SEC
+                        offset = j * stride_sec
                         segments.extend(
                             self._parse_segments(all_ts[idx + j], offset))
                     text = self._merge_segments(segments)

@@ -155,13 +155,34 @@ Measured directly: `generate(return_timestamps=True)` takes 7.23 s versus
 3.49 s, for only 141 versus 130 tokens per sequence. The cost is the timestamp
 logits processor running per decoding step, not the extra tokens.
 
-This is a genuine accuracy-for-throughput trade, and it is a **deliberate
-default**: correctness first. For maximum throughput instead, set:
+### Both modes ship, selectable per call
+
+This is a genuine accuracy-for-throughput trade, so both are available and
+chosen at runtime — not by mutating class state, which would race between
+concurrent requests on the server.
+
+| mode | merge | stride | WER | RTFx |
+|---|---|---|---|---|
+| **`fast`** (default) | string match | 28 s (2 s overlap) | 11.82% | 418–432× |
+| `accurate` | timestamps | 30 s (no overlap) | **6.83%** | 194–216× |
 
 ```python
-WhisperBlaze.USE_TIMESTAMP_MERGE = False
-WhisperBlaze.STRIDE_SEC = 28          # best setting for the string merge
+model.transcribe(audio, language="en")                    # fast (default)
+model.transcribe(audio, language="en", mode="accurate")   # half the WER
+model.transcribe_batch(audios, mode="accurate")
 ```
+
+In the container, `MODE` sets the default (`-e MODE=accurate`) and each
+request may override it:
+
+```bash
+curl -F file=@audio.mp3 -F language=en -F mode=accurate \
+     localhost:8000/v1/audio/transcriptions
+```
+
+Requests are grouped by `(language, task, mode)` before batching, so mixing
+modes across concurrent requests is safe. An unknown mode is rejected with
+400 rather than silently falling back.
 
 Note that the fastest engine in the throughput table (stock HF batched, 510×)
 uses non-overlapping chunks joined with spaces — the same approach measured
