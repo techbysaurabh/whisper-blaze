@@ -22,13 +22,10 @@ also documents honestly where whisper-blaze *loses*: a hand-written
 HuggingFace batching loop is ~20% faster in raw throughput, and `faster-whisper`
 has lower WER on short utterances.
 
-> **Status of the other CUDA kernels.** `csrc/` also contains WGMMA/TMA GEMM,
-> Flash-Attention-3 and FP8 kernels. These are **research work in progress and
-> are not used at runtime**: the GEMM has no Python binding, the attention
-> kernels return incorrect results (the repo's own
-> `test_attention_not_nan` fails), and the FP8 path dequantises back to FP16,
-> making it slower than plain PyTorch. The `precision=` presets therefore do
-> not change output or speed today. Only the LayerNorm kernel is wired in.
+> **Note:** the `precision=` presets (`mixed_fp8`, `aggressive_fp8`) have no
+> runtime effect today — the FP8, GEMM and attention kernels in `csrc/` are
+> work in progress and are not wired into the model. Only the LayerNorm kernel
+> is. See [BENCHMARKS.md](BENCHMARKS.md).
 
 ## Requirements
 
