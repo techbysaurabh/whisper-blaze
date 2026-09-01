@@ -1,0 +1,30 @@
+{
+  "blaze_full_fp16": {
+    "wer": 2.83,
+    "wall_s": 40.3,
+    "rtfx": 16.6
+  },
+  "blaze_mixed_fp8": {
+    "wer": 2.83,
+    "wall_s": 40.0,
+    "rtfx": 16.8
+  },
+  "blaze_aggressive_fp8": {
+    "wer": 2.83,
+    "wall_s": 40.2,
+    "rtfx": 16.7
+  },
+  "identical_to_fp16_mixed_fp8": "100/100",
+  "identical_to_fp16_aggressive_fp8": "100/100",
+  "faster_whisper_fp16": {
+    "wer": 1.76,
+    "wall_s": 25.6,
+    "rtfx": 26.2
+  },
+  "_meta": {
+    "dataset": "librispeech_asr test-clean",
+    "n": 100,
+    "audio_min": 11.2,
+    "gpu": "NVIDIA H100 80GB HBM3"
+  }
+}
