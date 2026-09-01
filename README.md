@@ -150,18 +150,6 @@ Client pool (10 concurrent)
 Dynamic batching delivers near-linear throughput scaling as concurrent requests
 increase, with idle VRAM automatically absorbed by larger batch sizes.
 
-## GPU Mel Spectrogram
-
-```python
-from whisper_blaze import WhisperBlazeProcessor
-
-proc = WhisperBlazeProcessor(device="cuda")
-mel = proc(audio_tensor, sampling_rate=16000)   # [1, 128, T] fp16 on GPU
-
-# Long audio with overlapping chunks
-mels = proc.process_chunks(long_audio, sampling_rate=16000, overlap_s=1.0)
-```
-
 ## Direct Kernel API
 
 ```python
@@ -179,13 +167,8 @@ out = k.layernorm_fused(hidden, residual, gamma, beta, 1e-5)
 # Fused RMSNorm
 out = k.rmsnorm_fused(hidden, residual, gamma, 1e-5)
 
-# Flash Attention 3
-out = k.encoder_self_attn(Q, K, V)    # no causal mask
-out = k.decoder_self_attn(Q, K, V)    # causal mask
-out = k.decoder_cross_attn(Q, K, V)   # no causal mask
-
-# GPU mel spectrogram
-mel = k.mel_spectrogram(audio_cpu_float32)  # → [1, 128, T] fp16 on GPU
+# Fused residual + LayerNorm, also returning the pre-norm sum
+normed, total = k.layernorm_fused_residual(hidden, residual, gamma, beta, 1e-5)
 ```
 
 ## Troubleshooting

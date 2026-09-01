@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "whisper-blaze"
-version = "0.1.13"
+version = "0.1.14"
 description = "High-throughput batched Whisper large-v3 serving on H100, with VRAM capping and a fused Hopper LayerNorm kernel"
 readme = "README.md"
 license = "MIT"
