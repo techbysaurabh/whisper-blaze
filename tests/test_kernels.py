@@ -121,6 +121,68 @@ class TestLayerNorm:
         ref   = F.layer_norm(x.float(), [D], gamma.float(), beta.float(), 1e-5)
         assert torch.allclose(out, ref, atol=ATOL, rtol=RTOL)
 
+    def test_residual_none_is_plain_layernorm(self, setup):
+        """residual=None must match torch LayerNorm on x alone."""
+        x, _, g, b, D = setup
+        out = kernels.layernorm_fused(x, None, g, b, 1e-5).float()
+        ref = F.layer_norm(x.float(), [D], g.float(), b.float(), 1e-5)
+        assert torch.allclose(out, ref, atol=ATOL, rtol=RTOL), \
+            f"plain LayerNorm max diff: {(out - ref).abs().max():.5f}"
+
+    def test_3d_input(self):
+        """Whisper hidden states arrive as [B, T, C], not flattened."""
+        B, T, D = 2, 64, 1280
+        x = torch.randn(B, T, D, dtype=torch.float16, device=DEVICE)
+        g = torch.ones(D, dtype=torch.float16, device=DEVICE)
+        b = torch.zeros(D, dtype=torch.float16, device=DEVICE)
+        out = kernels.layernorm_fused(x, None, g, b, 1e-5)
+        assert out.shape == x.shape
+        ref = F.layer_norm(x.float(), [D], g.float(), b.float(), 1e-5)
+        assert torch.allclose(out.float(), ref, atol=ATOL, rtol=RTOL)
+
+    def test_returns_residual_sum(self, setup):
+        """layernorm_fused_residual also returns the un-normalised sum, which
+        pre-norm blocks carry forward as the next residual."""
+        x, res, g, b, D = setup
+        normed, total = kernels.layernorm_fused_residual(x, res, g, b, 1e-5)
+        ref_norm = F.layer_norm((x + res).float(), [D], g.float(), b.float(), 1e-5)
+        assert torch.allclose(normed.float(), ref_norm, atol=ATOL, rtol=RTOL)
+        assert torch.equal(total, x + res), "returned sum must equal x + residual"
+
+
+class TestBlazeLayerNormModule:
+    """The nn.Module wrapper that _patch_layers() installs into the model."""
+
+    def test_matches_nn_layernorm(self):
+        from whisper_blaze.model import BlazeLayerNorm
+
+        ln = torch.nn.LayerNorm(1280, eps=1e-5).to(DEVICE).half()
+        torch.nn.init.normal_(ln.weight, mean=1.0, std=0.1)
+        torch.nn.init.normal_(ln.bias, mean=0.0, std=0.1)
+
+        blaze = BlazeLayerNorm.from_layernorm(ln)
+        x = torch.randn(2, 64, 1280, dtype=torch.float16, device=DEVICE)
+        assert torch.allclose(blaze(x).float(), ln(x).float(), atol=ATOL, rtol=RTOL)
+
+    def test_falls_back_off_gpu_and_in_fp32(self):
+        from whisper_blaze.model import BlazeLayerNorm
+
+        ln = torch.nn.LayerNorm(1280, eps=1e-5).to(DEVICE).half()
+        blaze = BlazeLayerNorm.from_layernorm(ln)
+        # FP32 input must not reach the FP16-only kernel
+        x32 = torch.randn(4, 1280, dtype=torch.float32, device=DEVICE)
+        assert blaze(x32).dtype == torch.float32
+
+    def test_supports_rejects_unsupported_shapes(self):
+        from whisper_blaze.model import BlazeLayerNorm
+
+        assert BlazeLayerNorm.supports(torch.nn.LayerNorm(1280))
+        # last dim not a multiple of the kernel's 8-wide vector loads
+        assert not BlazeLayerNorm.supports(torch.nn.LayerNorm(100))
+        # no affine parameters to read
+        assert not BlazeLayerNorm.supports(
+            torch.nn.LayerNorm(1280, elementwise_affine=False))
+
 
 # ---------------------------------------------------------------------------
 # RMSNorm

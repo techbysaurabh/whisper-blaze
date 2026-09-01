@@ -113,25 +113,57 @@ class BlazeLinear(nn.Module):
 # ---------------------------------------------------------------------------
 
 class BlazeLayerNorm(nn.Module):
-    """Wraps the fused residual-add + LayerNorm kernel."""
+    """Drop-in nn.LayerNorm backed by the fused CUDA kernel.
 
-    def __init__(self, weight: torch.Tensor, bias: torch.Tensor, eps: float = 1e-5) -> None:
+    Accepts an optional residual: passing one computes LayerNorm(x + residual)
+    in a single pass. Whisper is pre-norm and adds its residual separately, so
+    the model uses the residual-free form, which skips the residual read
+    entirely.
+    """
+
+    #: the kernel reads 8 halves at a time, so the last dim must be a multiple of 8
+    VECTOR_WIDTH = 8
+
+    def __init__(self, weight: torch.Tensor, bias: torch.Tensor,
+                 eps: float = 1e-5) -> None:
         super().__init__()
         self.register_buffer("weight", weight)
         self.register_buffer("bias",   bias)
         self.eps = eps
 
-    def forward(self, x: torch.Tensor, residual: torch.Tensor) -> torch.Tensor:
-        if _KERNELS_AVAILABLE:
+    @classmethod
+    def supports(cls, ln: nn.LayerNorm) -> bool:
+        """Whether this LayerNorm can be served by the kernel."""
+        return (
+            len(ln.normalized_shape) == 1
+            and ln.normalized_shape[0] % cls.VECTOR_WIDTH == 0
+            and ln.elementwise_affine
+            and ln.bias is not None
+        )
+
+    @classmethod
+    def from_layernorm(cls, ln: nn.LayerNorm) -> "BlazeLayerNorm":
+        return cls(ln.weight.data.detach().half().contiguous(),
+                   ln.bias.data.detach().half().contiguous(),
+                   ln.eps)
+
+    def forward(self, x: torch.Tensor,
+                residual: Optional[torch.Tensor] = None) -> torch.Tensor:
+        # The kernel handles contiguous FP16 CUDA tensors; anything else
+        # (FP32 autocast, CPU, a non-contiguous view) goes to torch.
+        if (_KERNELS_AVAILABLE and x.is_cuda and x.dtype == torch.float16
+                and x.is_contiguous()
+                and x.size(-1) % self.VECTOR_WIDTH == 0
+                and (residual is None
+                     or (residual.is_contiguous()
+                         and residual.dtype == torch.float16))):
             return _kernels.layernorm_fused(
-                x.half(), residual.half(),
-                self.weight.half(), self.bias.half(),
-                self.eps,
-            )
-        # Fallback
-        hidden = x + residual
+                x, residual, self.weight, self.bias, self.eps)
+
+        hidden = x if residual is None else x + residual
         return nn.functional.layer_norm(
-            hidden, [hidden.size(-1)], self.weight, self.bias, self.eps
+            hidden, [hidden.size(-1)],
+            self.weight.to(hidden.dtype), self.bias.to(hidden.dtype), self.eps
         )
 
 
@@ -261,8 +293,22 @@ class WhisperBlaze:
         return instance
 
     def _patch_layers(self) -> None:
-        """Replace HF attention / norm layers with Blaze kernel wrappers."""
-        pass
+        """Replace HF LayerNorm modules with the fused CUDA kernel.
+
+        Whisper is pre-norm: LayerNorm and the residual add are separate ops,
+        so each nn.LayerNorm becomes a plain (residual-free) kernel call.
+        The kernel falls back to torch for any input it cannot handle, so this
+        is safe for every shape and dtype the model produces.
+        """
+        self.patched_layernorms = 0
+        if not _KERNELS_AVAILABLE:
+            return
+
+        for parent in self.model.modules():
+            for name, child in list(parent.named_children()):
+                if isinstance(child, nn.LayerNorm) and BlazeLayerNorm.supports(child):
+                    setattr(parent, name, BlazeLayerNorm.from_layernorm(child))
+                    self.patched_layernorms += 1
 
     def transcribe(
         self,

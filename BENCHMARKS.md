@@ -17,9 +17,12 @@ Raw numbers: `benchmarks/results_kernels.json`, `results_e2e.json`,
 
 ---
 
-## Headline finding: the CUDA kernels do not run
+## Headline finding: the CUDA kernels did not run
 
-`WhisperBlaze._patch_layers()` (`whisper_blaze/model.py:263`) has a body of
+> **Partly addressed.** LayerNorm is now wired in — see the update below.
+> Attention, FP8 and the GEMM remain unwired.
+
+As originally measured, `WhisperBlaze._patch_layers()` had a body of
 `pass`. `BlazeLinear`, `BlazeAttention`, and `BlazeLayerNorm` are defined but
 never instantiated anywhere in the package. `WhisperBlaze.from_pretrained()`
 therefore returns a stock HuggingFace FP16 model, and the `precision=` argument
@@ -31,6 +34,65 @@ LibriSpeech utterances, `full_fp16`, `mixed_fp8`, and `aggressive_fp8` produced
 
 What the package actually provides today is HuggingFace `transformers` plus
 30-second chunking and cross-request batching.
+
+## Update — LayerNorm is now wired in
+
+`_patch_layers()` is implemented and replaces every `nn.LayerNorm` in the
+HuggingFace model with `BlazeLayerNorm`, which calls the fused kernel:
+**162 modules patched, 0 `nn.LayerNorm` remaining.**
+
+Two kernel changes made this possible:
+
+1. **Optional residual.** Whisper is pre-norm — `LayerNorm` and the residual
+   add are separate ops — so the kernel now accepts `residual=None` and skips
+   the read entirely. That took plain LayerNorm from 1.30× (feeding it a zero
+   tensor) to **1.81×** faster than `torch.nn.LayerNorm`.
+2. **`layernorm_fused_residual`** additionally returns the un-normalised
+   `x + residual`. Pre-norm blocks need that sum for the next residual, and
+   the original kernel returned only the normalised output, which made true
+   fusion impossible. Not yet used by the model; it is the building block for
+   fusing the add into the following norm.
+
+The old `layernorm_fused(x, residual, ...)` signature still works unchanged.
+
+**Effect, measured over two runs** (22 min of audio, versus the pre-wiring
+baseline in the table below):
+
+| Path | Before | After | Change |
+|---|---|---|---|
+| `transcribe_batch()` | 372.2× | 379.9–380.8× | **+2.1%** |
+| `transcribe()` serial | 203.8× | 205.7–210.4× | +1–3% |
+| stock HF batched (control, untouched code path) | 510.2× | 505.1–511.1× | ±1% (noise) |
+
+**Accuracy is unchanged: WER 2.83% before and after**, on the same 100
+LibriSpeech utterances.
+
+The gain is small because LayerNorm is a small share of total compute — but it
+is real (it exceeds the ±1% run-to-run noise the control shows), correct, and
+it proves the patching path works end to end. Attention is where a large win
+would be, and those kernels must be fixed before they can be wired in.
+
+### Build requirement discovered
+
+The extension **does not compile with CUDA 12.0**, contrary to `CLAUDE.md`:
+
+```
+ptxas error: Entry function '_Z22flash_attn_fp16_kernel...' uses too much
+shared data (0xc080 bytes, 0xc000 max)
+```
+
+Build with **CUDA 12.6**, which is what the original April build used:
+
+```bash
+CUDA_HOME=/usr/local/cuda-12.6 PATH=/usr/local/cuda-12.6/bin:$PATH \
+  pip install -e . --no-build-isolation
+```
+
+### The repo's own tests already caught the attention bug
+
+`pytest tests/test_kernels.py` → **26 passed, 1 failed**:
+`TestAttention::test_attention_not_nan` — *"encoder_self_attn produced NaNs"*.
+This independently confirms the correctness failures measured below.
 
 ## Kernel microbenchmarks
 

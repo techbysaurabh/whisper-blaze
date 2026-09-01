@@ -36,6 +36,13 @@ torch::Tensor layernorm_fused(const torch::Tensor& x,
                                const torch::Tensor& gamma,
                                const torch::Tensor& beta,
                                float epsilon);
+std::vector<torch::Tensor> layernorm_fused_impl(
+    const torch::Tensor& x,
+    const c10::optional<torch::Tensor>& residual,
+    const torch::Tensor& gamma,
+    const torch::Tensor& beta,
+    float epsilon,
+    bool want_sum);
 torch::Tensor rmsnorm_fused(const torch::Tensor& x,
                              const torch::Tensor& residual,
                              const torch::Tensor& gamma,
@@ -92,14 +99,39 @@ torch::Tensor py_dequantise_e5m2(const torch::Tensor& fp8, float scale,
 }
 
 torch::Tensor py_layernorm_fused(const torch::Tensor& x,
-                                  const torch::Tensor& residual,
+                                  const c10::optional<torch::Tensor>& residual,
                                   const torch::Tensor& gamma,
                                   const torch::Tensor& beta,
                                   float epsilon = 1e-5f) {
-    CHECK_INPUT(x); CHECK_INPUT(residual);
+    CHECK_INPUT(x);
     CHECK_INPUT(gamma); CHECK_INPUT(beta);
     CHECK_FP16(x);
-    return layernorm_fused(x, residual, gamma, beta, epsilon);
+    if (residual.has_value() && residual->defined()) {
+        CHECK_INPUT(residual.value());
+        TORCH_CHECK(residual->sizes() == x.sizes(),
+                    "residual must have the same shape as x");
+    }
+    return layernorm_fused_impl(x, residual, gamma, beta, epsilon, false)[0];
+}
+
+// Same kernel, but also returns the un-normalised (x + residual) sum, which
+// pre-norm transformers need to carry forward as the next residual.
+std::tuple<torch::Tensor, torch::Tensor> py_layernorm_fused_residual(
+        const torch::Tensor& x,
+        const c10::optional<torch::Tensor>& residual,
+        const torch::Tensor& gamma,
+        const torch::Tensor& beta,
+        float epsilon = 1e-5f) {
+    CHECK_INPUT(x);
+    CHECK_INPUT(gamma); CHECK_INPUT(beta);
+    CHECK_FP16(x);
+    if (residual.has_value() && residual->defined()) {
+        CHECK_INPUT(residual.value());
+        TORCH_CHECK(residual->sizes() == x.sizes(),
+                    "residual must have the same shape as x");
+    }
+    auto out = layernorm_fused_impl(x, residual, gamma, beta, epsilon, true);
+    return std::make_tuple(out[0], out[1]);
 }
 
 torch::Tensor py_rmsnorm_fused(const torch::Tensor& x,
@@ -168,8 +200,16 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 
     // Normalisation
     m.def("layernorm_fused", &py_layernorm_fused,
-          "Fused residual-add + LayerNorm → FP16.",
-          py::arg("x"), py::arg("residual"),
+          "Fused residual-add + LayerNorm → FP16. residual=None gives a plain "
+          "LayerNorm (no residual read).",
+          py::arg("x"), py::arg("residual") = py::none(),
+          py::arg("gamma"), py::arg("beta"),
+          py::arg("epsilon") = 1e-5f);
+
+    m.def("layernorm_fused_residual", &py_layernorm_fused_residual,
+          "Fused residual-add + LayerNorm → (normalised, x+residual). The "
+          "second output is the residual stream for pre-norm blocks.",
+          py::arg("x"), py::arg("residual") = py::none(),
           py::arg("gamma"), py::arg("beta"),
           py::arg("epsilon") = 1e-5f);
 
