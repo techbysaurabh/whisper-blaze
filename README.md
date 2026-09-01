@@ -1,16 +1,34 @@
 # whisper-blaze
 
-Hopper-native CUDA kernels for [Whisper large-v3](https://huggingface.co/openai/whisper-large-v3) on NVIDIA H100 GPUs.
+High-throughput batched serving for [Whisper large-v3](https://huggingface.co/openai/whisper-large-v3) on NVIDIA H100, with a fused Hopper LayerNorm kernel.
 
-Replaces standard PyTorch operations with hand-tuned CUDA kernels that exploit H100-specific hardware:
+- **Dynamic cross-request batching** — fuses concurrent requests into a single
+  `model.generate()` pass. **11× faster than chunk-at-a-time HuggingFace**
+  (418× vs 33× real-time on an idle H100).
+- **VRAM capping for shared GPUs** — `VRAM_LIMIT_GB=24` runs transcription in
+  24 GB of an 80 GB card and sizes batches to fit. Memory is linear and
+  measured: `peak_gb = 2.92 + 0.249 × chunks`.
+- **Two long-form modes, selectable per request** — `fast` (default, 11.8% WER,
+  ~420× real-time) or `accurate`, which stitches chunks on Whisper's own
+  timestamps for **6.8% WER** at ~215×.
+- **OpenAI-compatible server in one command** — point existing OpenAI audio
+  clients at it by changing the base URL.
+- **Fused residual + LayerNorm CUDA kernel** — 1.8–2.5× over `torch.nn.LayerNorm`,
+  used for all 162 LayerNorms in the model.
 
-- **WGMMA** (Warpgroup MMA) GEMM in FP16 and FP8 (E4M3 / E5M2)
-- **TMA** (Tensor Memory Accelerator) async bulk copy
-- **Flash Attention 3** for encoder self-attention, decoder self/cross-attention
-- **Fused residual + LayerNorm / RMSNorm**
-- **GPU mel spectrogram** (replaces CPU librosa/HuggingFace preprocessor)
-- **FP8 quantize/dequantize** with per-tensor scaling
-- **Dynamic cross-request batching** — fuses concurrent API calls into one `model.generate()` pass to fill all 80 GB of H100 VRAM
+Every number above is measured on a dedicated idle H100 and reproducible with
+the scripts in `benchmarks/` — see **[BENCHMARKS.md](BENCHMARKS.md)**, which
+also documents honestly where whisper-blaze *loses*: a hand-written
+HuggingFace batching loop is ~20% faster in raw throughput, and `faster-whisper`
+has lower WER on short utterances.
+
+> **Status of the other CUDA kernels.** `csrc/` also contains WGMMA/TMA GEMM,
+> Flash-Attention-3 and FP8 kernels. These are **research work in progress and
+> are not used at runtime**: the GEMM has no Python binding, the attention
+> kernels return incorrect results (the repo's own
+> `test_attention_not_nan` fails), and the FP8 path dequantises back to FP16,
+> making it slower than plain PyTorch. The `precision=` presets therefore do
+> not change output or speed today. Only the LayerNorm kernel is wired in.
 
 ## Requirements
 

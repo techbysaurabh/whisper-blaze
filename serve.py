@@ -55,7 +55,7 @@ _GB_PER_CHUNK      = 0.25
 _SAFETY            = 0.8
 _max_chunks: Optional[int] = None  # None = unlimited
 
-app = FastAPI(title="whisper-blaze", version="0.1.11")
+app = FastAPI(title="whisper-blaze", version="0.1.12")
 
 _model = None
 _queue: Optional[asyncio.Queue] = None

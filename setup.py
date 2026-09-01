@@ -71,8 +71,8 @@ ext_modules, cmdclass = get_ext_modules()
 
 setup(
     name="whisper-blaze",
-    version="0.1.11",
-    description="Hopper-native CUDA kernels for Whisper large-v3 on H100 GPU",
+    version="0.1.12",
+    description="High-throughput batched Whisper large-v3 serving on H100, with VRAM capping and a fused Hopper LayerNorm kernel",
     long_description=open("README.md").read()
     if os.path.exists("README.md")
     else "",
