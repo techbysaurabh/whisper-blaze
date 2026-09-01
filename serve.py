@@ -8,7 +8,7 @@ BATCH_WAIT_MS are fused into a single transcribe_batch() GPU pass.
 Environment
 -----------
 MODEL_ID       HF model id            (default: openai/whisper-large-v3)
-PRECISION      full_fp16 | mixed_fp8 | aggressive_fp8   (default: mixed_fp8)
+PRECISION      full_fp16              (default: full_fp16)
 BATCH_WAIT_MS  batching window in ms  (default: 200)
 MODE           fast | accurate        (default: fast)
                fast: stitches long audio by matching transcript strings over a
@@ -38,7 +38,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger("whisper-blaze-serve")
 
 MODEL_ID      = os.environ.get("MODEL_ID", "openai/whisper-large-v3")
-PRECISION     = os.environ.get("PRECISION", "mixed_fp8")
+PRECISION     = os.environ.get("PRECISION", "full_fp16")
 BATCH_WAIT_MS = float(os.environ.get("BATCH_WAIT_MS", "200"))
 MODE          = os.environ.get("MODE", "fast")
 VRAM_LIMIT_GB = float(os.environ.get("VRAM_LIMIT_GB", "0"))  # 0 = no limit
@@ -55,7 +55,7 @@ _GB_PER_CHUNK      = 0.25
 _SAFETY            = 0.8
 _max_chunks: Optional[int] = None  # None = unlimited
 
-app = FastAPI(title="whisper-blaze", version="0.1.12")
+app = FastAPI(title="whisper-blaze", version="0.1.13")
 
 _model = None
 _queue: Optional[asyncio.Queue] = None

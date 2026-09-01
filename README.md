@@ -17,15 +17,9 @@ High-throughput batched serving for [Whisper large-v3](https://huggingface.co/op
   used for all 162 LayerNorms in the model.
 
 Every number above is measured on a dedicated idle H100 and reproducible with
-the scripts in `benchmarks/` — see **[BENCHMARKS.md](BENCHMARKS.md)**, which
-also documents honestly where whisper-blaze *loses*: a hand-written
-HuggingFace batching loop is ~20% faster in raw throughput, and `faster-whisper`
-has lower WER on short utterances.
-
-> **Note:** the `precision=` presets (`mixed_fp8`, `aggressive_fp8`) have no
-> runtime effect today — the FP8, GEMM and attention kernels in `csrc/` are
-> work in progress and are not wired into the model. Only the LayerNorm kernel
-> is. See [BENCHMARKS.md](BENCHMARKS.md).
+the scripts in `benchmarks/`. Full methodology, comparisons against
+`faster-whisper` and stock HuggingFace, and raw results:
+**[BENCHMARKS.md](BENCHMARKS.md)**.
 
 ## Requirements
 
@@ -88,7 +82,7 @@ curl -F file=@audio.mp3 -F language=en localhost:8000/v1/audio/transcriptions
 ```
 
 Configure via env vars: `MODEL_ID` (any HF Whisper checkpoint), `PRECISION`
-(`full_fp16` / `mixed_fp8` / `aggressive_fp8`), `BATCH_WAIT_MS`, `PORT`,
+`BATCH_WAIT_MS`, `MODE` (`fast` / `accurate`), `PORT`,
 `HF_TOKEN`. Health check at `GET /health`. See `serve.py` and `Dockerfile`
 for details.
 
@@ -102,11 +96,11 @@ batches to fit the budget.
 
 ```python
 from whisper_blaze import WhisperBlaze
-from whisper_blaze.precision import mixed_fp8
+from whisper_blaze.precision import full_fp16
 
 model = WhisperBlaze.from_pretrained(
     "openai/whisper-large-v3",
-    precision=mixed_fp8(),
+    precision=full_fp16(),
 )
 
 # Single file — numpy array or torch tensor, float32, 16 kHz
@@ -139,20 +133,6 @@ pass, using ~78 GB — the remaining 40 GB that would otherwise sit idle.
 Longer audio produces more internal chunks and uses more VRAM; shorter audio
 batches more requests into the same GPU pass. The batcher automatically caps
 batch size to stay within the available VRAM budget.
-
-## Precision Presets
-
-| Preset | When to use |
-|---|---|
-| `full_fp16()` | Maximum quality, no quantization |
-| `mixed_fp8()` | **Recommended** — FP8 on FFN/QKV, FP16 on attention |
-| `aggressive_fp8()` | Maximum throughput, FP8 everywhere |
-
-```python
-from whisper_blaze.precision import full_fp16, mixed_fp8, aggressive_fp8
-
-model = WhisperBlaze.from_pretrained(precision=aggressive_fp8())
-```
 
 ## Serving at Scale
 

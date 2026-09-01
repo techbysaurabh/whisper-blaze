@@ -7,6 +7,7 @@ for each layer type in the Whisper model.
 """
 
 from __future__ import annotations
+import warnings
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -83,38 +84,28 @@ def full_fp16() -> PrecisionConfig:
 
 
 def mixed_fp8() -> PrecisionConfig:
+    """Deprecated alias for :func:`full_fp16`.
+
+    Kept so existing callers keep working. The FP8 kernels are not wired into
+    the model, so this returns the FP16 configuration rather than a config the
+    runtime would ignore.
     """
-    FP8 E4M3 on all large matmuls (FFN + QKV), FP16 where precision matters.
-    Recommended starting point — best quality/throughput trade-off.
-    """
-    e4m3 = LayerPrecision(Precision.FP8_E4M3, Precision.FP8_E4M3)
-    fp16 = LayerPrecision(Precision.FP16,     Precision.FP16)
-    return PrecisionConfig(
-        encoder_ffn        = e4m3,
-        encoder_attn_qkv   = e4m3,
-        encoder_attn_out   = fp16,  # post-softmax activations vary widely
-        decoder_self_attn  = fp16,  # causal attention is precision-sensitive
-        decoder_cross_attn = fp16,  # cross-attn scores span large range
-        decoder_ffn        = e4m3,
+    warnings.warn(
+        "mixed_fp8() is deprecated and returns the FP16 configuration; "
+        "FP8 execution is not available. Use full_fp16().",
+        DeprecationWarning, stacklevel=2,
     )
+    return full_fp16()
 
 
 def aggressive_fp8() -> PrecisionConfig:
-    """
-    FP8 everywhere possible.
-    Decoder cross-attention uses E5M2 for activations (wider dynamic range).
-    Maximum throughput, slight quality trade-off.
-    """
-    e4m3       = LayerPrecision(Precision.FP8_E4M3, Precision.FP8_E4M3)
-    e4m3_e5m2  = LayerPrecision(Precision.FP8_E4M3, Precision.FP8_E5M2)
-    return PrecisionConfig(
-        encoder_ffn        = e4m3,
-        encoder_attn_qkv   = e4m3,
-        encoder_attn_out   = e4m3,
-        decoder_self_attn  = e4m3,
-        decoder_cross_attn = e4m3_e5m2,  # wide range acts → E5M2
-        decoder_ffn        = e4m3,
+    """Deprecated alias for :func:`full_fp16`. See :func:`mixed_fp8`."""
+    warnings.warn(
+        "aggressive_fp8() is deprecated and returns the FP16 configuration; "
+        "FP8 execution is not available. Use full_fp16().",
+        DeprecationWarning, stacklevel=2,
     )
+    return full_fp16()
 
 
 # Name → factory map for CLI / config-file use

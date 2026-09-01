@@ -1,7 +1,7 @@
 # whisper-blaze — Hopper-native Whisper serving for H100
 #
-# Build:  docker build -t whisper-blaze:0.1.12 .
-# Run:    docker run --gpus all -p 8000:8000 whisper-blaze:0.1.12
+# Build:  docker build -t whisper-blaze:0.1.13 .
+# Run:    docker run --gpus all -p 8000:8000 whisper-blaze:0.1.13
 #
 # The kernels are compiled for sm_90a (H100/H200 only).
 
@@ -51,7 +51,7 @@ COPY serve.py /app/serve.py
 WORKDIR /app
 
 ENV MODEL_ID=openai/whisper-large-v3 \
-    PRECISION=mixed_fp8 \
+    PRECISION=full_fp16 \
     BATCH_WAIT_MS=200 \
     PORT=8000 \
     HF_HOME=/data/hf
