@@ -64,7 +64,9 @@ model.transcribe_batch([audio[:SR * 60]], language="en", task="transcribe")  # w
 
 results = {}
 # 30 = no overlap; 25 = the shipped default (5 s overlap); 28 = 2 s overlap
-for stride in (30, 28, 25, 20):
+import itertools
+for ts_merge, stride in itertools.product((True, False), (30, 28, 25)):
+    model.USE_TIMESTAMP_MERGE = ts_merge
     model.STRIDE_SEC = stride
     n_chunks = len(range(0, len(audio), stride * SR))
     torch.cuda.empty_cache()
@@ -76,22 +78,19 @@ for stride in (30, 28, 25, 20):
 
     w = wer(norm(reference), norm(out[0]["text"]))
     peak = torch.cuda.max_memory_allocated() / 2**30
-    results[f"stride_{stride}s"] = {
+    tag = f"{'timestamp' if ts_merge else 'string':>9}_merge_stride_{stride}s"
+    results[tag] = {
         "overlap_s": 30 - stride, "chunks": n_chunks,
         "wer": round(w * 100, 2), "wall_s": round(dt, 2),
         "rtfx": round(total_s / dt, 1), "peak_vram_gb": round(peak, 2),
     }
-    print(f"  stride {stride:2d}s (overlap {30-stride}s)  chunks {n_chunks:3d}  "
+    print(f"  {tag:<28} chunks {n_chunks:3d}  "
           f"WER {w*100:6.2f}%  {dt:6.2f}s  RTFx {total_s/dt:6.1f}x  peak {peak:5.2f} GB")
 
 print("\n=== verdict ===")
-base = results["stride_25s"]
-for k, v in results.items():
-    if k == "stride_25s":
-        continue
-    d_wer = v["wer"] - base["wer"]
-    d_spd = 100 * (v["rtfx"] / base["rtfx"] - 1)
-    print(f"  {k:<14} vs shipped default: WER {d_wer:+.2f} pts, speed {d_spd:+.1f}%")
+best = min(results.items(), key=lambda kv: kv[1]["wer"])
+print(f"  lowest WER: {best[0]}  WER {best[1]['wer']}%  RTFx {best[1]['rtfx']}x  "
+      f"chunks {best[1]['chunks']}")
 
 with open("benchmarks/results_overlap.json", "w") as f:
     json.dump(results, f, indent=2)

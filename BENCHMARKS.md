@@ -113,6 +113,64 @@ The gap to a plain HuggingFace batching loop narrowed from 37% to 23%
 (516.7× vs 418.5×). What remains is mostly that blaze still decodes 58 chunks
 where non-overlapping windows need 45.
 
+## Update — timestamp-based merging (new default)
+
+Overlapping chunks were stitched by matching transcript strings, which fails
+whenever two decodes of the same audio disagree by one character. Chunks are
+now decoded with `return_timestamps=True` and stitched using Whisper's own
+segment boundaries: each segment's time is made absolute, and a segment whose
+audio was already covered is dropped (`_merge_segments`).
+
+Because timestamps handle segmentation, **overlap is no longer needed** —
+`STRIDE_SEC` is now 30 (no overlap), which is also the fewest chunks.
+
+27 min of long-form audio, `benchmarks/bench_overlap.py` (WER is bit-identical
+across repeat runs — decoding is deterministic):
+
+| Merge | Stride | Chunks | WER | RTFx |
+|---|---|---|---|---|
+| **timestamps (new default)** | **30 s** | **55** | **6.83%** | 212.4× |
+| timestamps | 28 s | 58 | 16.93% | 213.3× |
+| timestamps | 25 s | 65 | 16.40% | 150.0× |
+| string match | 30 s | 55 | 13.21% | 405.8× |
+| string match (previous default) | 28 s | 58 | 11.82% | 432.3× |
+| string match | 25 s | 65 | 14.07% | 428.4× |
+
+**Long-form WER nearly halves: 11.82% → 6.83%** (42% relative). Short-utterance
+WER is unchanged at 2.83% — audio under 30 s is never chunked.
+
+Timestamps only help without overlap. With overlap they are *worse* (16.93% at
+2 s), because the time-based dedup keeps the copy decoded at a chunk edge in
+preference to the better-centred one. Zero overlap sidesteps this entirely.
+
+### The cost: ~2× slower generation
+
+| Path | Before (string merge, 28 s) | Now (timestamps, 30 s) |
+|---|---|---|
+| Long-form WER | 11.82% | **6.83%** |
+| `transcribe_batch()` on the call corpus | 418.5× | 194.4× |
+| Peak VRAM | 15.10 GB | 14.38 GB |
+
+Measured directly: `generate(return_timestamps=True)` takes 7.23 s versus
+3.49 s, for only 141 versus 130 tokens per sequence. The cost is the timestamp
+logits processor running per decoding step, not the extra tokens.
+
+This is a genuine accuracy-for-throughput trade, and it is a **deliberate
+default**: correctness first. For maximum throughput instead, set:
+
+```python
+WhisperBlaze.USE_TIMESTAMP_MERGE = False
+WhisperBlaze.STRIDE_SEC = 28          # best setting for the string merge
+```
+
+Note that the fastest engine in the throughput table (stock HF batched, 510×)
+uses non-overlapping chunks joined with spaces — the same approach measured
+here at **13.21% WER**. Compared like-for-like at its best accuracy,
+whisper-blaze delivers roughly half the WER at about 40% of the throughput.
+
+`_transcribe_long()` now delegates to `transcribe_batch()` so both entry points
+share one chunking and merging implementation.
+
 ### KV cache — blocked upstream
 
 Profiling showed `CatArrayBatchedCopy` at 31.8 ms (5.8% of GPU time), which is

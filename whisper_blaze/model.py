@@ -17,6 +17,7 @@ Usage:
 
 from __future__ import annotations
 
+import re
 import numpy as np
 import torch
 import torch.nn as nn
@@ -249,12 +250,22 @@ class WhisperBlaze:
 
     SAMPLE_RATE = 16_000
     CHUNK_SEC   = 30
-    # 2 s overlap. Measured on 27 min of long-form audio (benchmarks/
-    # bench_overlap.py): 2 s gives WER 11.82%, against 13.21% with no overlap,
-    # 14.07% at the previous 5 s and 24.28% at 10 s. Too much overlap defeats
-    # _merge_chunks()'s string-matching dedup and leaves duplicated text, so
-    # more overlap is not safer — it is worse, and slower.
-    STRIDE_SEC  = 28
+    # No overlap. Timestamp-based merging (below) segments long audio using
+    # Whisper's own segment boundaries, which removes the need to re-decode
+    # overlapping audio. Measured on 27 min of long-form audio
+    # (benchmarks/bench_overlap.py): 6.83% WER here, against 11.82% for the
+    # best overlap setting under the old string-matching merge.
+    # If USE_TIMESTAMP_MERGE is turned off, set this to 28 (2 s overlap),
+    # which is the best the string merge achieves.
+    STRIDE_SEC  = 30
+
+    #: Segment long audio using Whisper's own timestamps rather than by
+    #: matching transcript strings across overlapping chunks. Nearly halves
+    #: long-form WER (6.83% vs 11.82%) because decoding with timestamps is the
+    #: mode Whisper was trained for, but generation costs ~2x: the timestamp
+    #: logits processor runs per decoding step. Set False (and STRIDE_SEC=28)
+    #: for maximum throughput at lower accuracy.
+    USE_TIMESTAMP_MERGE = True
 
     def __init__(
         self,
@@ -375,49 +386,12 @@ class WhisperBlaze:
     def _transcribe_long(
         self, audio: np.ndarray, language: Optional[str], task: str
     ) -> str:
+        """Batched transcription for audio longer than 30 s.
+
+        Delegates to transcribe_batch() so both entry points share one
+        chunking and merging implementation.
         """
-        Batched transcription for long audio.
-        Splits into 30s chunks with 5s overlap, pads to equal length,
-        and runs all chunks through model.generate() in one GPU batch.
-        """
-        sr = self.SAMPLE_RATE
-        chunk_len = self.CHUNK_SEC * sr
-        stride    = self.STRIDE_SEC * sr
-
-        # Split into overlapping chunks
-        chunks: List[np.ndarray] = []
-        for start in range(0, len(audio), stride):
-            end = min(start + chunk_len, len(audio))
-            chunks.append(audio[start:end])
-            if end >= len(audio):
-                break
-
-        # Pad to same length for batching
-        max_len = max(len(c) for c in chunks)
-        padded  = [np.pad(c, (0, max_len - len(c))) for c in chunks]
-
-        # Batch process — one GPU forward pass for all chunks
-        input_features = self.processor(
-            padded,
-            sampling_rate=sr,
-            return_tensors="pt",
-            padding=True,
-        ).input_features.to(self.device, dtype=torch.float16)
-
-        generate_kwargs = {
-            "task": task,
-            "no_repeat_ngram_size": 3,
-        }
-        if language:
-            generate_kwargs["language"] = language
-
-        with torch.inference_mode():
-            predicted_ids = self.model.generate(input_features, **generate_kwargs)
-
-        texts = self.processor.batch_decode(predicted_ids, skip_special_tokens=True)
-
-        # Merge with overlap dedup
-        return self._merge_chunks(texts)
+        return self.transcribe_batch([audio], language=language, task=task)[0]["text"]
 
     def transcribe_batch(
         self,
@@ -489,26 +463,111 @@ class WhisperBlaze:
         generate_kwargs: Dict = {"task": task, "no_repeat_ngram_size": 3}
         if language:
             generate_kwargs["language"] = language
+        # Timestamps let overlapping chunks be stitched by time rather than by
+        # matching transcript strings; see _merge_segments.
+        if self.USE_TIMESTAMP_MERGE:
+            generate_kwargs["return_timestamps"] = True
 
         with torch.inference_mode():
             predicted_ids = self.model.generate(input_features, **generate_kwargs)
 
         all_texts = self.processor.batch_decode(predicted_ids, skip_special_tokens=True)
+        all_ts = None
+        if self.USE_TIMESTAMP_MERGE:
+            # Decode one sequence at a time: the timestamp decoder walks tokens
+            # as Python ints, which batch_decode does not guarantee.
+            tok = self.processor.tokenizer
+            all_ts = [tok.decode(list(seq), skip_special_tokens=False,
+                                 decode_with_timestamps=True)
+                      for seq in predicted_ids.tolist()]
 
         # Re-assemble per-request results
         results: List[Dict[str, str]] = []
         idx = 0
         for count in chunk_counts:
             texts = all_texts[idx : idx + count]
-            idx  += count
-            text  = texts[0].strip() if count == 1 else self._merge_chunks(texts)
+            text = ""
+            if count == 1:
+                text = texts[0].strip()
+            else:
+                if all_ts is not None:
+                    segments: List[Tuple[float, float, str]] = []
+                    for j in range(count):
+                        offset = j * self.STRIDE_SEC
+                        segments.extend(
+                            self._parse_segments(all_ts[idx + j], offset))
+                    text = self._merge_segments(segments)
+                # Fall back to string matching if timestamps were unusable.
+                if not text:
+                    text = self._merge_chunks(texts)
+            idx += count
             results.append({"text": text, "language": language or "auto"})
 
         return results
 
+    #: Whisper emits segment boundaries as <|12.34|> tokens.
+    _TS_RE = re.compile(r"<\|(\d+\.\d+)\|>")
+    #: any other special token (<|endoftext|>, <|en|>, <|transcribe|>, ...);
+    #: timestamps must be kept during decoding, so these survive with them.
+    _SPECIAL_RE = re.compile(r"<\|[^|]*\|>")
+
+    @classmethod
+    def _parse_segments(cls, text_with_ts: str, offset_s: float
+                        ) -> List[Tuple[float, float, str]]:
+        """Parse '<|0.00|> hello<|2.50|>' into [(start, end, text)] in absolute
+        seconds. Returns [] if the text carries no usable timestamps."""
+        parts = cls._TS_RE.split(text_with_ts)
+        if len(parts) < 3:
+            return []
+
+        segments: List[Tuple[float, float, str]] = []
+        # parts alternates: [pre, ts, text, ts, text, ...]
+        for i in range(1, len(parts) - 1, 2):
+            try:
+                start = float(parts[i])
+            except ValueError:
+                continue
+            text = parts[i + 1]
+            end = start
+            if i + 2 < len(parts):
+                try:
+                    end = float(parts[i + 2])
+                except ValueError:
+                    pass
+            text = cls._SPECIAL_RE.sub("", text).strip()
+            if text:
+                segments.append((offset_s + start, offset_s + end, text))
+        return segments
+
+    @staticmethod
+    def _merge_segments(segments: List[Tuple[float, float, str]],
+                        tolerance_s: float = 0.4) -> str:
+        """Stitch segments from overlapping chunks using their timestamps.
+
+        A segment whose audio was already covered by an accepted segment is a
+        re-decode of the overlap region, so it is dropped. This replaces
+        matching transcript strings, which fails whenever the two decodes of
+        the same audio disagree by even one character.
+        """
+        if not segments:
+            return ""
+        segments = sorted(segments, key=lambda s: (s[0], s[1]))
+
+        kept: List[str] = []
+        covered_to = float("-inf")
+        for start, end, text in segments:
+            if start < covered_to - tolerance_s:
+                continue                      # already-transcribed audio
+            kept.append(text)
+            covered_to = max(covered_to, end)
+        return " ".join(kept).strip()
+
     @staticmethod
     def _merge_chunks(texts: List[str]) -> str:
-        """Merge overlapping chunk transcriptions, removing duplicates."""
+        """Merge overlapping chunk transcriptions, removing duplicates.
+
+        String-matching fallback, used when timestamps are unavailable.
+        """
         if not texts:
             return ""
         if len(texts) == 1:
