@@ -19,6 +19,9 @@ MODE           fast | accurate        (default: fast)
 VRAM_LIMIT_GB  cap GPU memory use, e.g. 30 to use 30 GB of an 80 GB H100
                (default: 0 = use all available VRAM). A batch that still
                exceeds the cap is halved and retried rather than failed.
+CHUNK_VRAM_GB  GB budgeted per 30s chunk when sizing batches (default: 1.15).
+               Memory scales with decoded text, not just chunk count, so
+               long-transcript workloads need a larger figure.
 PORT           listen port            (default: 8000)
 """
 
@@ -52,17 +55,22 @@ VRAM_LIMIT_GB = float(os.environ.get("VRAM_LIMIT_GB", "0"))  # 0 = no limit
 SAMPLE_RATE   = 16000
 CHUNK_SEC     = 30
 
-# Batch sizing under a VRAM limit, measured on H100 with large-v3 and real
-# speech (linear fit, max residual 0.03 GB; identical across precision
-# presets since FP8 quantization is in-kernel and weights stay FP16):
-#   peak_gb = 2.92 + 0.249 * chunks
-# _SAFETY derates for decode-length variance across workloads.
-_MODEL_OVERHEAD_GB = 3.0
-_GB_PER_CHUNK      = 0.25
-_SAFETY            = 0.8
+# Batch sizing under a VRAM limit.
+#
+# A microbenchmark on short-transcript audio suggested ~0.25 GB per 30s chunk,
+# but that badly underestimates real workloads: memory scales with how much
+# text is decoded, not just with the number of encoder chunks. Long calls
+# produce long transcripts, and the decoder's KV caches — cross-attention in
+# particular, which spans all 1500 encoder positions for every layer and every
+# item in the batch — dominate. Production call-centre traffic measures nearer
+# 1.15 GB per chunk, so that is the default. Raise CHUNK_VRAM_GB if batches
+# OOM, lower it if the GPU is visibly idle at the cap.
+_MODEL_OVERHEAD_GB = float(os.environ.get("MODEL_OVERHEAD_GB", "3.0"))
+_GB_PER_CHUNK      = float(os.environ.get("CHUNK_VRAM_GB", "1.15"))
+_SAFETY            = float(os.environ.get("VRAM_SAFETY", "0.8"))
 _max_chunks: Optional[int] = None  # None = unlimited
 
-app = FastAPI(title="whisper-blaze", version="0.1.15")
+app = FastAPI(title="whisper-blaze", version="0.1.16")
 
 _model = None
 _queue: Optional[asyncio.Queue] = None
@@ -148,8 +156,11 @@ async def _run_group(loop, items: List[dict], language, task, mode) -> None:
     try:
         results = await loop.run_in_executor(
             _gpu_executor,
-            lambda: _model.transcribe_batch(audios, language=language,
-                                            task=task, mode=mode),
+            lambda: _model.transcribe_batch(
+                audios, language=language, task=task, mode=mode,
+                # Under a fraction cap, device-free memory overstates what this
+                # process may allocate, so pass the budget-derived limit.
+                max_chunks_per_pass=_max_chunks),
         )
         for it, res in zip(items, results):
             if not it["future"].done():

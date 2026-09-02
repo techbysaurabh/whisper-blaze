@@ -1,7 +1,7 @@
 # whisper-blaze — Hopper-native Whisper serving for H100
 #
-# Build:  docker build -t whisper-blaze:0.1.15 .
-# Run:    docker run --gpus all -p 8000:8000 whisper-blaze:0.1.15
+# Build:  docker build -t whisper-blaze:0.1.16 .
+# Run:    docker run --gpus all -p 8000:8000 whisper-blaze:0.1.16
 #
 # The kernels are compiled for sm_90a (H100/H200 only).
 

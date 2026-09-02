@@ -421,18 +421,41 @@ class WhisperBlaze:
         return self.transcribe_batch(
             [audio], language=language, task=task, mode=mode)[0]["text"]
 
+    #: GB of GPU memory per 30s chunk in one generate() pass. Empirical, from
+    #: real call-centre traffic: memory scales with decoded text (KV caches),
+    #: not just chunk count, so short-transcript benchmarks underestimate it.
+    CHUNK_VRAM_GB = 1.15
+
+    def _auto_chunks_per_pass(self) -> int:
+        """Chunks per generate() pass sized from GPU memory available to this
+        process right now: device free memory plus the allocator's cached-but-
+        unused pool. Conservative by 20%; the OOM-halving retry in
+        transcribe_batch() covers any remaining misestimate."""
+        try:
+            free_b, _ = torch.cuda.mem_get_info()
+            cached_b = torch.cuda.memory_reserved() - torch.cuda.memory_allocated()
+            avail_gb = (free_b + max(0, cached_b)) / 2**30
+        except Exception:  # CPU-only or exotic device — pick a safe fixed size
+            return 8
+        return int(max(1, min(32, avail_gb * 0.8 / self.CHUNK_VRAM_GB)))
+
     def transcribe_batch(
         self,
         audio_list: List,
         language: Optional[str] = None,
         task: str = "transcribe",
         mode: Optional[str] = None,
+        max_chunks_per_pass: Optional[int] = None,
     ) -> List[Dict[str, str]]:
         """
-        Transcribe multiple audio files in a single GPU forward pass.
+        Transcribe multiple audio files in batched GPU passes.
 
-        All chunks from all requests are stacked into one tensor and processed
-        with a single model.generate() call, maximising H100 VRAM utilisation.
+        All 30s chunks from all requests are stacked and processed through
+        model.generate() in slices of at most max_chunks_per_pass chunks, so
+        peak GPU memory is bounded by the slice size rather than by total
+        audio duration. A slice that still hits CUDA OOM is retried with a
+        halved slice size (down to one chunk), so long inputs degrade to more,
+        smaller passes instead of failing.
 
         Parameters
         ----------
@@ -441,6 +464,8 @@ class WhisperBlaze:
         task       : "transcribe" or "translate" — applied to all items
         mode       : "accurate" (default) or "fast" — see MODES. Resolved per
                      call, so concurrent callers can use different modes.
+        max_chunks_per_pass : cap on 30s chunks per generate() call. None
+                     derives one from currently available GPU memory.
 
         Returns
         -------
@@ -484,14 +509,6 @@ class WhisperBlaze:
         max_len = max(chunk_len, max(len(c) for c in all_chunks))
         padded  = [np.pad(c, (0, max_len - len(c))) for c in all_chunks]
 
-        # One generate() call for the entire combined batch
-        input_features = self.processor(
-            padded,
-            sampling_rate=sr,
-            return_tensors="pt",
-            padding=True,
-        ).input_features.to(self.device, dtype=torch.float16)
-
         generate_kwargs: Dict = {"task": task, "no_repeat_ngram_size": 3}
         if language:
             generate_kwargs["language"] = language
@@ -500,18 +517,47 @@ class WhisperBlaze:
         if use_timestamps:
             generate_kwargs["return_timestamps"] = True
 
-        with torch.inference_mode():
-            predicted_ids = self.model.generate(input_features, **generate_kwargs)
+        # Chunks are processed in slices so peak memory is set by the slice
+        # size, not by how much audio the caller passed. Each slice is an
+        # independent encoder pass over disjoint chunks, so slicing does not
+        # change the output. On CUDA OOM the slice size is halved and the
+        # slice retried; only a single chunk that still cannot fit raises.
+        pass_size = max_chunks_per_pass or self._auto_chunks_per_pass()
+        all_texts: List[str] = []
+        all_ts: Optional[List[str]] = [] if use_timestamps else None
+        i = 0
+        while i < len(padded):
+            j = min(i + pass_size, len(padded))
+            try:
+                input_features = self.processor(
+                    padded[i:j],
+                    sampling_rate=sr,
+                    return_tensors="pt",
+                    padding=True,
+                ).input_features.to(self.device, dtype=torch.float16)
 
-        all_texts = self.processor.batch_decode(predicted_ids, skip_special_tokens=True)
-        all_ts = None
-        if use_timestamps:
-            # Decode one sequence at a time: the timestamp decoder walks tokens
-            # as Python ints, which batch_decode does not guarantee.
-            tok = self.processor.tokenizer
-            all_ts = [tok.decode(list(seq), skip_special_tokens=False,
-                                 decode_with_timestamps=True)
-                      for seq in predicted_ids.tolist()]
+                with torch.inference_mode():
+                    predicted_ids = self.model.generate(
+                        input_features, **generate_kwargs)
+            except torch.cuda.OutOfMemoryError:
+                if pass_size == 1:
+                    raise
+                torch.cuda.empty_cache()
+                pass_size = max(1, pass_size // 2)
+                continue
+
+            all_texts.extend(self.processor.batch_decode(
+                predicted_ids, skip_special_tokens=True))
+            if use_timestamps:
+                # Decode one sequence at a time: the timestamp decoder walks
+                # tokens as Python ints, which batch_decode does not guarantee.
+                tok = self.processor.tokenizer
+                all_ts.extend(
+                    tok.decode(list(seq), skip_special_tokens=False,
+                               decode_with_timestamps=True)
+                    for seq in predicted_ids.tolist())
+            del input_features, predicted_ids
+            i = j
 
         # Re-assemble per-request results
         results: List[Dict[str, str]] = []
